@@ -675,6 +675,20 @@
 <div><label class="text-[11px] text-slate-400 block mb-1">B. Alim ($)</label><input type="number" step="0.01" id="emp-bono-alim" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-white"></div>
 <div><label class="text-[11px] text-slate-400 block mb-1">Subsidio ($)</label><input type="number" step="0.01" id="emp-otros-ing" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-white"></div>
 </div>
+<div class="border-t border-slate-800 pt-3 mt-1">
+<label class="text-[11px] text-slate-400 block mb-2">Pago del Bono de Alimentación <span class="text-[10px] text-slate-500 font-normal">(marca en qué quincena se paga)</span></label>
+<div class="grid grid-cols-2 gap-2">
+<label class="flex items-center bg-slate-950 border border-slate-800 hover:border-emerald-600/50 rounded-lg p-2 cursor-pointer transition">
+<input type="checkbox" id="emp-bono-q1" checked class="mr-2 w-4 h-4 text-emerald-500 rounded bg-slate-900 border-slate-700">
+<div><div class="text-xs text-white font-semibold">1era Quincena</div><div class="text-[10px] text-slate-500">Día 1 al 15</div></div>
+</label>
+<label class="flex items-center bg-slate-950 border border-slate-800 hover:border-emerald-600/50 rounded-lg p-2 cursor-pointer transition">
+<input type="checkbox" id="emp-bono-q2" checked class="mr-2 w-4 h-4 text-emerald-500 rounded bg-slate-900 border-slate-700">
+<div><div class="text-xs text-white font-semibold">2da Quincena</div><div class="text-[10px] text-slate-500">Día 16 al 30/31</div></div>
+</label>
+</div>
+<p class="text-[10px] text-slate-500 mt-1.5"><i class="fa-solid fa-circle-info mr-1"></i>Ambas: 50% / 50% · Solo una: 100% en esa quincena · Ninguna: no se paga</p>
+</div>
 <div class="pt-2"><input type="checkbox" id="emp-activo" class="mr-1"><label class="text-xs text-slate-300">Activo</label></div>
 </div>
 <div class="p-4 border-t border-slate-800 flex justify-end space-x-2">
@@ -833,13 +847,45 @@ function totalAnticiposBs(empId) {
     return obtenerAnticiposEmpleado(empId).reduce((s, a) => s + Number(a.monto_bs || 0), 0);
 }
 
+// ================= BONO ALIMENTACIÓN: HELPERS =================
+function getQuincenaDeFecha(fechaISO) {
+    if (!fechaISO) return 1;
+    const p = String(fechaISO).split('-');
+    if (p.length < 3) return 1;
+    return parseInt(p[2], 10) <= 15 ? 1 : 2;
+}
+
+// Devuelve el monto del bono que corresponde pagar en la quincena de la fecha dada.
+// Ambas quincenas marcadas → 50% del bono mensual
+// Solo una marcada → 100% del bono mensual en esa quincena
+// Ninguna → 0
+function calcularBonoAlimentacionDelPeriodo(empleado, fechaPago) {
+    const bonoMensual = Number(empleado.bono_alimentacion) || 0;
+    const q1 = (empleado.bono_alim_q1 === undefined || empleado.bono_alim_q1 === null) ? true : !!empleado.bono_alim_q1;
+    const q2 = (empleado.bono_alim_q2 === undefined || empleado.bono_alim_q2 === null) ? true : !!empleado.bono_alim_q2;
+    if (!q1 && !q2) return 0;
+    if (q1 && q2) return bonoMensual / 2;
+    const q = getQuincenaDeFecha(fechaPago);
+    if (q1 && !q2) return q === 1 ? bonoMensual : 0;
+    if (!q1 && q2) return q === 2 ? bonoMensual : 0;
+    return 0;
+}
+
+// Bono realmente pagado en una nómina guardada (compat con registros viejos)
+function getBonoAlimPagadoNomina(r) {
+    if (r.bono_alimentacion_pagado !== undefined && r.bono_alimentacion_pagado !== null) {
+        return Number(r.bono_alimentacion_pagado) || 0;
+    }
+    return (Number(r.bono_alimentacion) || 0) / 2;
+}
+
 function verificarSesionInicial() {
     const ses = sessionStorage.getItem('nomina_usuario_activo');
     if(ses) { try { const u = JSON.parse(ses); appState.usuarioActual = u; iniciarSistemaAutenticado(); return; } catch(e) {} }
     gId('login-screen').classList.remove('hidden');
     gId('app-wrapper').classList.add('hidden');
     gId('app-wrapper').classList.remove('flex');
-  actualizarHintLogin(); // ← NUEVO
+  actualizarHintLogin();
 }
 
 async function ejecutarLogin(e) {
@@ -849,10 +895,6 @@ async function ejecutarLogin(e) {
     const errDiv = gId('login-error');
     errDiv.classList.add('hidden');
 
-    // ═══════════════════════════════════════════════════════
-    // PASO 1: Verificar si la base de datos está creada
-    // (consultando la tabla "usuarios" en Supabase)
-    // ═══════════════════════════════════════════════════════
     let bdExiste = false;
     let usuariosBD = [];
     let errorBD = null;
@@ -860,27 +902,12 @@ async function ejecutarLogin(e) {
     if (supabaseClient) {
         try {
             const { data, error } = await supabaseClient.from('usuarios').select('*');
-            if (!error) {
-                bdExiste = true;
-                usuariosBD = data || [];
-            } else if (error.code === '42P01' || (error.message || '').toLowerCase().includes('does not exist')) {
-                bdExiste = false; // la tabla no existe
-            } else {
-                errorBD = error.message;
-                bdExiste = false;
-            }
-        } catch (err) {
-            errorBD = err.message;
-            bdExiste = false;
-        }
-    } else {
-        errorBD = 'Sin conexión a Supabase configurada';
-    }
+            if (!error) { bdExiste = true; usuariosBD = data || []; }
+            else if (error.code === '42P01' || (error.message || '').toLowerCase().includes('does not exist')) { bdExiste = false; }
+            else { errorBD = error.message; bdExiste = false; }
+        } catch (err) { errorBD = err.message; bdExiste = false; }
+    } else { errorBD = 'Sin conexión a Supabase configurada'; }
 
-    // ═══════════════════════════════════════════════════════
-    // CASO A: NO hay base de datos creada todavía
-    // → Solo se permite master/master123 (modo bootstrap)
-    // ═══════════════════════════════════════════════════════
     if (!bdExiste) {
         if (usr.toLowerCase() === 'master' && pass === 'master123') {
             const masterUser = { id: 1, nombre: 'Super Administrador', usuario: 'master', clave: 'master123', rol: 'master', activo: true };
@@ -896,10 +923,6 @@ async function ejecutarLogin(e) {
         return;
     }
 
-    // ═══════════════════════════════════════════════════════
-    // CASO B: BD existe pero la tabla "usuarios" está VACÍA
-    // → Aceptar master/master123 Y crearlo en Supabase
-    // ═══════════════════════════════════════════════════════
     if (usuariosBD.length === 0) {
         if (usr.toLowerCase() === 'master' && pass === 'master123') {
             const masterSeed = { nombre: 'Super Administrador', usuario: 'master', clave: 'master123', rol: 'master', activo: true };
@@ -918,26 +941,13 @@ async function ejecutarLogin(e) {
         return;
     }
 
-    // ═══════════════════════════════════════════════════════
-    // CASO C: BD existe CON usuarios
-    // → Validar SOLO contra la tabla usuarios de Supabase
-    // ═══════════════════════════════════════════════════════
     const coincidencia = usuariosBD.find(u =>
         String(u.usuario || '').toLowerCase() === usr.toLowerCase() &&
         String(u.clave || '') === String(pass)
     );
 
-    if (!coincidencia) {
-        errDiv.innerText = 'Usuario o contraseña incorrectos.';
-        errDiv.classList.remove('hidden');
-        return;
-    }
-
-    if (!coincidencia.activo) {
-        errDiv.innerText = 'Usuario inactivo. Contacta al administrador.';
-        errDiv.classList.remove('hidden');
-        return;
-    }
+    if (!coincidencia) { errDiv.innerText = 'Usuario o contraseña incorrectos.'; errDiv.classList.remove('hidden'); return; }
+    if (!coincidencia.activo) { errDiv.innerText = 'Usuario inactivo. Contacta al administrador.'; errDiv.classList.remove('hidden'); return; }
 
     appState.usuarioActual = coincidencia;
     appState.usuarios = usuariosBD;
@@ -997,7 +1007,7 @@ function aplicarPermisosSegunRol() {
 
 function cargarCacheLocal() {
     const p = localStorage.getItem('nomina_parametros');
-    if(p) appState.parametros = JSON.parse(p);
+    if(p) { try { appState.parametros = { ...appState.parametros, ...JSON.parse(p) }; } catch(e){} }
     const u = localStorage.getItem('nomina_usuarios');
     if(u) { try { appState.usuarios = JSON.parse(u); } catch(e){ appState.usuarios = [...USUARIOS_DEFAULT]; } }
     else appState.usuarios = [...USUARIOS_DEFAULT];
@@ -1041,14 +1051,13 @@ async function guardarParametrosGenerales() {
     showToast('Parámetros guardados');
 }
 
-// ================= CONEXIÓN SUPABASE =================
-// ================= CONEXIÓN Y CREACIÓN DE BD =================
+// ================= SCHEMA SUPABASE =================
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS usuarios (id BIGSERIAL PRIMARY KEY, nombre TEXT NOT NULL, usuario TEXT UNIQUE NOT NULL, clave TEXT NOT NULL, rol TEXT DEFAULT 'consulta', activo BOOLEAN DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS departamentos (id BIGSERIAL PRIMARY KEY, nombre TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS cargos (id BIGSERIAL PRIMARY KEY, nombre TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW());
-CREATE TABLE IF NOT EXISTS empleados (id BIGSERIAL PRIMARY KEY, fecha_ingreso DATE, cedula TEXT, nombre TEXT NOT NULL, telefono TEXT, departamento_id BIGINT, cargo_id BIGINT, sueldo NUMERIC(15,2) DEFAULT 0, bono_alimentacion NUMERIC(15,2) DEFAULT 0, otros_ingresos NUMERIC(15,2) DEFAULT 0, saldo_prestamo NUMERIC(15,2) DEFAULT 0, anticipos_prestaciones NUMERIC(15,2) DEFAULT 0, activo BOOLEAN DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW());
-CREATE TABLE IF NOT EXISTS nominas (id BIGSERIAL PRIMARY KEY, fecha_pago DATE NOT NULL, empleado_id BIGINT, empleado TEXT, cargo TEXT, tasa_bcv NUMERIC(15,2), salario_minimo_bs NUMERIC(15,2), salario_base NUMERIC(15,2), bono_alimentacion NUMERIC(15,2), otros_ingresos NUMERIC(15,2), dias_faltantes NUMERIC(10,2) DEFAULT 0, otras_asignaciones NUMERIC(15,2) DEFAULT 0, horas_descuento NUMERIC(10,2) DEFAULT 0, otros_descuentos NUMERIC(15,2) DEFAULT 0, adelantos NUMERIC(15,2) DEFAULT 0, prestamos NUMERIC(15,2) DEFAULT 0, ivss_usd NUMERIC(15,4) DEFAULT 0, rpe_usd NUMERIC(15,4) DEFAULT 0, faov_usd NUMERIC(15,4) DEFAULT 0, descuentos_ley_usd NUMERIC(15,4) DEFAULT 0, neto_usd NUMERIC(15,2) DEFAULT 0, neto_bs NUMERIC(15,2) DEFAULT 0, estado TEXT DEFAULT 'Procesado', created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS empleados (id BIGSERIAL PRIMARY KEY, fecha_ingreso DATE, cedula TEXT, nombre TEXT NOT NULL, telefono TEXT, departamento_id BIGINT, cargo_id BIGINT, sueldo NUMERIC(15,2) DEFAULT 0, bono_alimentacion NUMERIC(15,2) DEFAULT 0, otros_ingresos NUMERIC(15,2) DEFAULT 0, saldo_prestamo NUMERIC(15,2) DEFAULT 0, anticipos_prestaciones NUMERIC(15,2) DEFAULT 0, bono_alim_q1 BOOLEAN DEFAULT TRUE, bono_alim_q2 BOOLEAN DEFAULT TRUE, activo BOOLEAN DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS nominas (id BIGSERIAL PRIMARY KEY, fecha_pago DATE NOT NULL, empleado_id BIGINT, empleado TEXT, cargo TEXT, tasa_bcv NUMERIC(15,2), salario_minimo_bs NUMERIC(15,2), salario_base NUMERIC(15,2), bono_alimentacion NUMERIC(15,2), bono_alimentacion_pagado NUMERIC(15,2) DEFAULT 0, otros_ingresos NUMERIC(15,2), dias_faltantes NUMERIC(10,2) DEFAULT 0, otras_asignaciones NUMERIC(15,2) DEFAULT 0, horas_descuento NUMERIC(10,2) DEFAULT 0, otros_descuentos NUMERIC(15,2) DEFAULT 0, adelantos NUMERIC(15,2) DEFAULT 0, prestamos NUMERIC(15,2) DEFAULT 0, ivss_usd NUMERIC(15,4) DEFAULT 0, rpe_usd NUMERIC(15,4) DEFAULT 0, faov_usd NUMERIC(15,4) DEFAULT 0, descuentos_ley_usd NUMERIC(15,4) DEFAULT 0, neto_usd NUMERIC(15,2) DEFAULT 0, neto_bs NUMERIC(15,2) DEFAULT 0, estado TEXT DEFAULT 'Procesado', created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS historico_salarios (id BIGSERIAL PRIMARY KEY, empleado_id BIGINT NOT NULL, mes TEXT NOT NULL, sueldo_base NUMERIC(15,2) DEFAULT 0, bono_alimentacion NUMERIC(15,2) DEFAULT 0, subsidio NUMERIC(15,2) DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(empleado_id, mes));
 CREATE TABLE IF NOT EXISTS prenomina_borrador (id BIGINT PRIMARY KEY, fecha_pago DATE, tasa_bcv NUMERIC(15,2), salario_minimo NUMERIC(15,2), lunes INT, filas JSONB, updated_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS vacaciones (id BIGSERIAL PRIMARY KEY, empleado_id BIGINT, empleado TEXT, periodo TEXT, fecha_inicio DATE, gran_total_usd NUMERIC(15,2), gran_total_bs NUMERIC(15,2), total_usd NUMERIC(15,2), total_bs NUMERIC(15,2), detalle_calculo JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
@@ -1058,6 +1067,10 @@ CREATE TABLE IF NOT EXISTS prestaciones (id BIGSERIAL PRIMARY KEY, empleado_id B
 CREATE TABLE IF NOT EXISTS anticipos_prestaciones (id BIGSERIAL PRIMARY KEY, empleado_id BIGINT NOT NULL, monto_bs NUMERIC(15,2) NOT NULL, fecha DATE NOT NULL, concepto TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS tasas_mensuales (mes TEXT PRIMARY KEY, tasa_promedio NUMERIC(10,4), tasa_anual NUMERIC(10,4), tasa_mensual NUMERIC(10,4), tasa_dolar NUMERIC(15,2), created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS parametros_config (id BIGINT PRIMARY KEY, nombre_empresa TEXT, rif_empresa TEXT, dias_utilidades INT DEFAULT 30, updated_at TIMESTAMPTZ DEFAULT NOW());
+-- Migraciones para instalaciones existentes
+ALTER TABLE empleados ADD COLUMN IF NOT EXISTS bono_alim_q1 BOOLEAN DEFAULT TRUE;
+ALTER TABLE empleados ADD COLUMN IF NOT EXISTS bono_alim_q2 BOOLEAN DEFAULT TRUE;
+ALTER TABLE nominas ADD COLUMN IF NOT EXISTS bono_alimentacion_pagado NUMERIC(15,2) DEFAULT 0;
 `;
 
 const SCHEMA_RLS_Y_DATOS = `
@@ -1117,11 +1130,9 @@ async function crearBaseDeDatos() {
     const client = supabase.createClient(url, anon);
 
     try {
-        // Intentar primero con RPC exec_sql (la que creaste en Supabase)
         const { error } = await client.rpc('exec_sql', { sql_query: sqlFull });
 
         if (error) {
-            // Si la función no existe, dar instrucciones
             if (error.code === '42883' || error.message.includes('could not find') || error.message.includes('does not exist')) {
                 mostrarModalCrearFuncion(url);
                 return;
@@ -1137,7 +1148,6 @@ async function crearBaseDeDatos() {
         actualizarBadgeSidebar();
         actualizarBadgeConexion();
         await fetchAllData();
-// ⚡ REFUERZO: Garantizar que el usuario master exista en Supabase
 try {
     const { data: usuariosExistentes } = await client.from('usuarios').select('id').limit(1);
     if (!usuariosExistentes || usuariosExistentes.length === 0) {
@@ -1148,7 +1158,6 @@ try {
             rol: 'master',
             activo: true
         }]);
-        console.log('[BD] Usuario master insertado como respaldo');
     }
 } catch(e) { console.warn('No se pudo verificar/insertar master:', e); }
     } catch (err) {
@@ -1201,7 +1210,6 @@ function mostrarModalCrearFuncion(url) {
     showToast('Se abrió una ventana con las instrucciones', 'error');
 }
 
-// Mantén la función mostrarModalSQLManual como fallback
 function mostrarModalSQLManual(sql, motivo) {
     const w = window.open('', '_blank');
     if (!w) { alert('Debes permitir ventanas emergentes.'); return; }
@@ -1216,8 +1224,6 @@ function mostrarModalSQLManual(sql, motivo) {
     <textarea id="sql" readonly>${sql}</textarea></body></html>`);
     showToast('Se abrió ventana con el SQL de respaldo', 'error');
 }
-
- 
 
 async function actualizarBadgeConexion() {
     const badge = gId('param-conn-status');
@@ -1247,7 +1253,6 @@ async function actualizarBadgeConexion() {
 async function verificarBaseDatos() {
     if(!supabaseClient) return showToast('Primero conecta a Supabase', 'error');
     
-    // Definimos cada tabla con una columna que SÍ existe en cada una
     const tablasConColumna = [
         { tabla: 'usuarios', col: 'id' },
         { tabla: 'departamentos', col: 'id' },
@@ -1261,7 +1266,7 @@ async function verificarBaseDatos() {
         { tabla: 'antiguedad', col: 'id' },
         { tabla: 'prestaciones', col: 'id' },
         { tabla: 'anticipos_prestaciones', col: 'id' },
-        { tabla: 'tasas_mensuales', col: 'mes' },      // ← su clave es 'mes', no 'id'
+        { tabla: 'tasas_mensuales', col: 'mes' },
         { tabla: 'parametros_config', col: 'id' }
     ];
     
@@ -1270,8 +1275,6 @@ async function verificarBaseDatos() {
     
     for(const t of tablasConColumna) {
         const { error } = await supabaseClient.from(t.tabla).select(t.col).limit(1);
-        // Solo consideramos la tabla como faltante si el error es específicamente
-        // "relation does not exist" (código PostgreSQL 42P01), NO si es "column does not exist"
         if (error) {
             const msg = (error.message || '').toLowerCase();
             const esRelation = error.code === '42P01' || msg.includes('relation') && msg.includes('does not exist');
@@ -1407,14 +1410,60 @@ async function eliminarEmpleado(id) { if(confirm('¿Eliminar?')) { if(supabaseCl
 async function eliminarDepartamento(id) { if(confirm('¿Eliminar?')) { if(supabaseClient) try { await supabaseClient.from('departamentos').delete().eq('id',id); } catch(e){} appState.departamentos = appState.departamentos.filter(x => String(x.id) !== String(id)); renderDepartamentos(); populateSelects(); } }
 async function eliminarCargo(id) { if(confirm('¿Eliminar?')) { if(supabaseClient) try { await supabaseClient.from('cargos').delete().eq('id',id); } catch(e){} appState.cargos = appState.cargos.filter(x => String(x.id) !== String(id)); renderCargos(); populateSelects(); } }
 
-function abrirCrearEmpleado() { ['emp-id','emp-fecha','emp-cedula','emp-nombre','emp-telefono'].forEach(id=>gId(id).value=''); ['emp-sueldo','emp-bono-alim','emp-otros-ing'].forEach(id=>gId(id).value='0'); gId('emp-depto-select').value=''; gId('emp-cargo-select').value=''; gId('emp-activo').checked=true; openModal('modal-empleado'); }
-function editarEmpleado(id) { const e = appState.empleados.find(x=>String(x.id)===String(id)); if(e){ gId('emp-id').value=e.id; gId('emp-fecha').value=e.fecha_ingreso||''; gId('emp-cedula').value=e.cedula||''; gId('emp-nombre').value=e.nombre||''; gId('emp-telefono').value=e.telefono||''; gId('emp-depto-select').value=e.departamento_id||''; gId('emp-cargo-select').value=e.cargo_id||''; gId('emp-sueldo').value=e.sueldo||0; gId('emp-bono-alim').value=e.bono_alimentacion||0; gId('emp-otros-ing').value=e.otros_ingresos||0; gId('emp-activo').checked=e.activo; openModal('modal-empleado'); } }
+function abrirCrearEmpleado() { 
+    ['emp-id','emp-fecha','emp-cedula','emp-nombre','emp-telefono'].forEach(id=>gId(id).value=''); 
+    ['emp-sueldo','emp-bono-alim','emp-otros-ing'].forEach(id=>gId(id).value='0'); 
+    gId('emp-depto-select').value=''; 
+    gId('emp-cargo-select').value=''; 
+    if(gId('emp-bono-q1')) gId('emp-bono-q1').checked = true;
+    if(gId('emp-bono-q2')) gId('emp-bono-q2').checked = true;
+    gId('emp-activo').checked=true; 
+    openModal('modal-empleado'); 
+}
+function editarEmpleado(id) { 
+    const e = appState.empleados.find(x=>String(x.id)===String(id)); 
+    if(e){ 
+        gId('emp-id').value=e.id; 
+        gId('emp-fecha').value=e.fecha_ingreso||''; 
+        gId('emp-cedula').value=e.cedula||''; 
+        gId('emp-nombre').value=e.nombre||''; 
+        gId('emp-telefono').value=e.telefono||''; 
+        gId('emp-depto-select').value=e.departamento_id||''; 
+        gId('emp-cargo-select').value=e.cargo_id||''; 
+        gId('emp-sueldo').value=e.sueldo||0; 
+        gId('emp-bono-alim').value=e.bono_alimentacion||0; 
+        gId('emp-otros-ing').value=e.otros_ingresos||0; 
+        if(gId('emp-bono-q1')) gId('emp-bono-q1').checked = e.bono_alim_q1 !== false;
+        if(gId('emp-bono-q2')) gId('emp-bono-q2').checked = e.bono_alim_q2 !== false;
+        gId('emp-activo').checked=e.activo; 
+        openModal('modal-empleado'); 
+    } 
+}
 async function guardarEmpleado() { 
     const id=gId('emp-id').value; 
-    const p={ fecha_ingreso:gId('emp-fecha').value||null, cedula:gId('emp-cedula').value, nombre:gId('emp-nombre').value, telefono:gId('emp-telefono').value, departamento_id:gId('emp-depto-select').value||null, cargo_id:gId('emp-cargo-select').value||null, sueldo:parseFloat(gId('emp-sueldo').value)||0, bono_alimentacion:parseFloat(gId('emp-bono-alim').value)||0, otros_ingresos:parseFloat(gId('emp-otros-ing').value)||0, activo:gId('emp-activo').checked }; 
+    const p={ 
+        fecha_ingreso:gId('emp-fecha').value||null, 
+        cedula:gId('emp-cedula').value, 
+        nombre:gId('emp-nombre').value, 
+        telefono:gId('emp-telefono').value, 
+        departamento_id:gId('emp-depto-select').value||null, 
+        cargo_id:gId('emp-cargo-select').value||null, 
+        sueldo:parseFloat(gId('emp-sueldo').value)||0, 
+        bono_alimentacion:parseFloat(gId('emp-bono-alim').value)||0, 
+        otros_ingresos:parseFloat(gId('emp-otros-ing').value)||0, 
+        bono_alim_q1: gId('emp-bono-q1')?.checked ?? true,
+        bono_alim_q2: gId('emp-bono-q2')?.checked ?? true,
+        activo:gId('emp-activo').checked 
+    }; 
     if(!p.cedula||!p.nombre) return showToast('Faltan datos','error'); 
-    if(supabaseClient) { try { await (id ? supabaseClient.from('empleados').update(p).eq('id',id) : supabaseClient.from('empleados').insert([p])); } catch(e){} }
-    closeModal('modal-empleado'); fetchAllData(); 
+    if(supabaseClient) { 
+        try { 
+            const { error } = await (id ? supabaseClient.from('empleados').update(p).eq('id',id) : supabaseClient.from('empleados').insert([p])); 
+            if (error) console.warn('Bono alim (¿falta migrar BD?):', error.message);
+        } catch(e){} 
+    }
+    closeModal('modal-empleado'); 
+    fetchAllData(); 
 }
 
 function abrirCrearDepartamento() { gId('depto-id').value=''; gId('depto-nombre').value=''; openModal('modal-departamento'); }
@@ -1629,9 +1678,13 @@ function calcularNominaFila(id) {
     const t = parseFloat(gId('nom-tasa-bcv').value) || 36.5; 
     const sM = parseFloat(gId('nom-salario-minimo').value) || 130; 
     const lun = parseInt(gId('nom-lunes').value) || 2;
+    const fechaPago = gId('nom-fecha-proceso')?.value;
     const sb = Number(e.sueldo) || 0; 
-    const si = sb + (Number(e.bono_alimentacion) || 0) + (Number(e.otros_ingresos) || 0); 
-    const dia = si / 30; const base = dia * 15;
+    const oim = Number(e.otros_ingresos) || 0;
+    const bonoAlimPeriodo = calcularBonoAlimentacionDelPeriodo(e, fechaPago);
+    // Base real a pagar esta quincena
+    const base = (sb / 2) + bonoAlimPeriodo + (oim / 2);
+    const diaPeriodo = base / 15;
     const df = parseFloat(gId(`df-${id}`)?.value || 0); 
     const oa = parseFloat(gId(`oa-${id}`)?.value || 0); 
     const hd = parseFloat(gId(`hd-${id}`)?.value || 0); 
@@ -1643,7 +1696,7 @@ function calcularNominaFila(id) {
     const rpe = (Math.min(sbBs, 10 * sM) * 12 / 52) * 0.005 * lun; 
     const faov = (sbBs * 0.01) / 2;
     const leyU = (ivss + rpe + faov) / t; 
-    const netoU = base - (dia * df) + oa - ((dia / 8) * hd) - od - ad - pr - leyU; 
+    const netoU = base - (diaPeriodo * df) + oa - ((diaPeriodo / 8) * hd) - od - ad - pr - leyU; 
     const netoB = netoU * t;
     const elLey = gId(`ley-${id}`); if(elLey) elLey.innerText = `Bs. ${(ivss + rpe + faov).toFixed(2)}`;
     const elNetoU = gId(`neto-usd-${id}`); if(elNetoU) elNetoU.innerText = `$${netoU.toFixed(2)}`;
@@ -1675,7 +1728,15 @@ function renderTablaNominaEditable() {
         const odVal = safeNum(bEmp.od); const adVal = safeNum(bEmp.ad);
         let prVal = prestamoSugeridoDef;
         if (bEmp.pr !== undefined) { const parsedPr = parseFloat(bEmp.pr); if (!isNaN(parsedPr)) prVal = parsedPr.toFixed(2); }
-        return `<tr><td class="p-3" style="min-width:170px;"><div class="font-bold text-white">${e.nombre}</div><div class="text-[10px] text-slate-400">${e.cedula}</div></td>
+        // Badge de esquema de bono
+        const q1 = e.bono_alim_q1 !== false;
+        const q2 = e.bono_alim_q2 !== false;
+        let bonoBadge = '';
+        if (q1 && q2)       bonoBadge = '<span class="text-[9px] bg-slate-800 text-slate-400 px-1 rounded ml-1" title="50% en cada quincena">50/50</span>';
+        else if (q1)        bonoBadge = '<span class="text-[9px] bg-amber-950 text-amber-300 px-1 rounded ml-1" title="100% en 1era quincena">1°Q</span>';
+        else if (q2)        bonoBadge = '<span class="text-[9px] bg-sky-950 text-sky-300 px-1 rounded ml-1" title="100% en 2da quincena">2°Q</span>';
+        else                bonoBadge = '<span class="text-[9px] bg-rose-950 text-rose-300 px-1 rounded ml-1" title="Sin bono">Sin</span>';
+        return `<tr><td class="p-3" style="min-width:170px;"><div class="font-bold text-white">${e.nombre}${bonoBadge}</div><div class="text-[10px] text-slate-400">${e.cedula}</div></td>
         <td class="p-3 font-semibold text-sky-400">$${si.toFixed(2)}</td>
         <td class="p-3 text-center"><input type="number" id="df-${e.id}" value="${dfVal}" min="0" oninput="actualizarFilaYTotales(${e.id}); autoguardarBorradorNomina();" style="width:56px;" class="bg-slate-950 border border-slate-800 rounded text-center p-1 text-xs text-white"></td>
         <td class="p-3"><input type="number" step="0.01" id="oa-${e.id}" value="${oaVal}" oninput="actualizarFilaYTotales(${e.id}); autoguardarBorradorNomina();" style="width:80px;" class="bg-slate-950 border border-slate-800 rounded p-1 text-xs text-white"></td>
@@ -1700,8 +1761,11 @@ async function procesarNominaGlobal() {
     const regs = []; const empUpdates = [];
     for (const e of act) {
         const sb = Number(e.sueldo) || 0; 
-        const si = sb + (Number(e.bono_alimentacion) || 0) + (Number(e.otros_ingresos) || 0); 
-        const dia = si / 30; const base = dia * 15;
+        const oim = Number(e.otros_ingresos) || 0;
+        const bonoAlimMensual = Number(e.bono_alimentacion) || 0;
+        const bonoAlimPeriodo = calcularBonoAlimentacionDelPeriodo(e, f);
+        const base = (sb / 2) + bonoAlimPeriodo + (oim / 2);
+        const diaPeriodo = base / 15;
         const df = parseFloat(gId(`df-${e.id}`).value) || 0; 
         const oa = parseFloat(gId(`oa-${e.id}`).value) || 0; 
         const hd = parseFloat(gId(`hd-${e.id}`).value) || 0; 
@@ -1713,9 +1777,19 @@ async function procesarNominaGlobal() {
         const rpe = (Math.min(sbBs, 10 * sM) * 12 / 52) * 0.005 * lun; 
         const faov = (sbBs * 0.01) / 2; 
         const leyU = (ivss + rpe + faov) / t; 
-        const netoU = base - (dia * df) + oa - ((dia / 8) * hd) - od - ad - pr - leyU;
+        const netoU = base - (diaPeriodo * df) + oa - ((diaPeriodo / 8) * hd) - od - ad - pr - leyU;
         if (pr > 0) { const nuevoSaldo = Math.max(0, (Number(e.saldo_prestamo) || 0) - pr); e.saldo_prestamo = nuevoSaldo; empUpdates.push(supabaseClient.from('empleados').update({ saldo_prestamo: nuevoSaldo }).eq('id', e.id)); }
-        regs.push({ fecha_pago: f, empleado_id: e.id, empleado: e.nombre, cargo: e.cargos?.nombre || '-', tasa_bcv: t, salario_minimo_bs: sM, salario_base: sb, bono_alimentacion: Number(e.bono_alimentacion) || 0, otros_ingresos: Number(e.otros_ingresos) || 0, dias_faltantes: df, otras_asignaciones: oa, horas_descuento: hd, otros_descuentos: od, adelantos: ad, prestamos: pr, ivss_usd: ivss / t, rpe_usd: rpe / t, faov_usd: faov / t, descuentos_ley_usd: leyU, neto_usd: netoU, neto_bs: netoU * t, estado: 'Procesado' });
+        regs.push({ 
+            fecha_pago: f, empleado_id: e.id, empleado: e.nombre, cargo: e.cargos?.nombre || '-', 
+            tasa_bcv: t, salario_minimo_bs: sM, salario_base: sb, 
+            bono_alimentacion: bonoAlimMensual, 
+            bono_alimentacion_pagado: bonoAlimPeriodo, 
+            otros_ingresos: oim, 
+            dias_faltantes: df, otras_asignaciones: oa, horas_descuento: hd, 
+            otros_descuentos: od, adelantos: ad, prestamos: pr, 
+            ivss_usd: ivss / t, rpe_usd: rpe / t, faov_usd: faov / t, 
+            descuentos_ley_usd: leyU, neto_usd: netoU, neto_bs: netoU * t, estado: 'Procesado' 
+        });
     }
     if (empUpdates.length > 0) await Promise.all(empUpdates);
     if(supabaseClient) await supabaseClient.from('nominas').insert(regs); 
@@ -1759,16 +1833,17 @@ function generarTXTAlimentacion(fecha) {
     const regs = appState.nominas.filter(n => n.fecha_pago === fecha);
     if (regs.length === 0) return showToast('Sin registros', 'error');
     let c = '';
+    let count = 0;
     regs.forEach(r => {
         const e = appState.empleados.find(x => String(x.id) === String(r.empleado_id)) || {};
         const t = Number(r.tasa_bcv) || 1;
-        const bam = Number(r.bono_alimentacion) || 0;
+        const bonoAlimPagado = getBonoAlimPagadoNomina(r);
         const df = Number(r.dias_faltantes) || 0;
-        const mBs = (bam/30)*(15-df)*t;
-        c += `${formatearCedulaBanco(e.cedula||r.cedula)}  ${formatearMontoFechaBanco(mBs, fecha)}\n`;
+        const mBs = (bonoAlimPagado / 15) * (15 - df) * t;
+        if (mBs > 0) { c += `${formatearCedulaBanco(e.cedula||r.cedula)}  ${formatearMontoFechaBanco(mBs, fecha)}\n`; count++; }
     });
     descargarTXT(c, `ALIMENTACION_${fecha.replace(/-/g,'')}.txt`);
-    showToast(`TXT generado (${regs.length} regs)`);
+    showToast(`TXT generado (${count} regs con bono)`);
 }
 function generarTXTSubsidio(fecha) {
     const regs = appState.nominas.filter(n => n.fecha_pago === fecha);
@@ -1780,8 +1855,10 @@ function generarTXTSubsidio(fecha) {
         const sb = Number(r.salario_base) || 0, bam = Number(r.bono_alimentacion) || 0, oim = Number(r.otros_ingresos) || 0;
         const oa = Number(r.otras_asignaciones) || 0, df = Number(r.dias_faltantes) || 0, hd = Number(r.horas_descuento) || 0;
         const od = Number(r.otros_descuentos) || 0, ad = Number(r.adelantos) || 0, pr = Number(r.prestamos) || 0;
-        const dia = (sb+bam+oim)/30;
-        const subUSD = ((oim/30)*(15-df))+oa-((dia/8)*hd)-od-ad-pr;
+        const bonoAlimPagado = getBonoAlimPagadoNomina(r);
+        const base = (sb/2) + bonoAlimPagado + (oim/2);
+        const diaPeriodo = base / 15;
+        const subUSD = ((oim/2)*(15-df)/15)+oa-((diaPeriodo/8)*hd)-od-ad-pr;
         c += `${formatearCedulaBanco(e.cedula||r.cedula)}  ${formatearMontoFechaBanco(subUSD*t, fecha)}\n`;
     });
     descargarTXT(c, `SUBSIDIO_${fecha.replace(/-/g,'')}.txt`);
@@ -1790,8 +1867,6 @@ function generarTXTSubsidio(fecha) {
 async function eliminarNominaProcesada(f) { 
     if (appState.usuarioActual?.rol !== 'master') return showToast('Sin permisos', 'error');
     if(!confirm('¿Eliminar la nómina del ' + f + '?')) return; 
-    
-    // Reintegrar préstamos amortizados
     const nd = appState.nominas.filter(n => n.fecha_pago === f);
     const empU = [];
     nd.forEach(n => { 
@@ -1806,21 +1881,12 @@ async function eliminarNominaProcesada(f) {
         } 
     });
     if (empU.length > 0) await Promise.all(empU);
-    
-    // Borrar en Supabase
     if(supabaseClient) {
         const res = await supabaseClient.from('nominas').delete().eq('fecha_pago', f);
-        if(res && res.error) { 
-            showToast('Error al eliminar en Supabase: ' + res.error.message, 'error'); 
-            return; 
-        }
+        if(res && res.error) { showToast('Error al eliminar en Supabase: ' + res.error.message, 'error'); return; }
     }
-    
-    // ⚡ EL FIX: borrar también del estado y del localStorage
     appState.nominas = appState.nominas.filter(n => n.fecha_pago !== f);
     localStorage.setItem('nomina_procesadas', JSON.stringify(appState.nominas));
-    
-    // Refrescar solo la tabla del histórico (sin fetchAllData)
     renderHistoricoNominas();
     showToast('Nómina eliminada'); 
 }
@@ -1832,19 +1898,21 @@ function verDetalleNomina(f) {
     let tb=0,ta=0,ti=0,tr=0,tf=0,to=0,tu=0,tbs=0,tSal=0,tAlim=0,tSub=0;
     gId('tabla-detalle-body').innerHTML = regs.map(r => {
         const sq = Number(r.salario_base)/2;
-        const as = (Number(r.bono_alimentacion)/2)+(Number(r.otros_ingresos)/2)+Number(r.otras_asignaciones);
+        const bonoAlimPagado = getBonoAlimPagadoNomina(r);
+        const as = bonoAlimPagado + (Number(r.otros_ingresos)/2) + Number(r.otras_asignaciones);
         const ivss = Number(r.ivss_usd), rpe = Number(r.rpe_usd), faov = Number(r.faov_usd);
         const od = Number(r.otros_descuentos)+Number(r.adelantos)+Number(r.prestamos);
         const nu = Number(r.neto_usd||0), nb = Number(r.neto_bs);
         const t = Number(r.tasa_bcv)||1;
-        const sb=Number(r.salario_base)||0, bam=Number(r.bono_alimentacion)||0, oim=Number(r.otros_ingresos)||0;
+        const sb=Number(r.salario_base)||0, oim=Number(r.otros_ingresos)||0;
         const oav=Number(r.otras_asignaciones)||0, dfv=Number(r.dias_faltantes)||0, hdv=Number(r.horas_descuento)||0;
         const odv=Number(r.otros_descuentos)||0, adv=Number(r.adelantos)||0, prv=Number(r.prestamos)||0;
-        const dia = (sb+bam+oim)/30;
+        const base = (sb/2) + bonoAlimPagado + (oim/2);
+        const diaPeriodo = base / 15;
         const leyUsd = ivss+rpe+faov;
-        const salBs = ((sb/30)*(15-dfv)-leyUsd)*t;
-        const alimBs = (bam/30)*(15-dfv)*t;
-        const subBs = (((oim/30)*(15-dfv))+oav-((dia/8)*hdv)-odv-adv-prv)*t;
+        const salBs = ((sb/2)*(15-dfv)/15 - leyUsd)*t;
+        const alimBs = (bonoAlimPagado/15)*(15-dfv)*t;
+        const subBs = ((oim/2)*(15-dfv)/15 + oav - (diaPeriodo/8)*hdv - odv - adv - prv)*t;
         tb+=sq; ta+=as; ti+=ivss; tr+=rpe; tf+=faov; to+=od; tu+=nu; tbs+=nb;
         tSal+=salBs; tAlim+=alimBs; tSub+=subBs;
         return `<tr><td class="p-2.5 font-semibold text-white">${r.empleado}</td><td class="p-2.5 text-slate-400">${r.cargo||'-'}</td>
@@ -1870,17 +1938,19 @@ function generarHTMLReciboSolo(r, fecha) {
     const e = appState.empleados.find(x => String(x.id) === String(r.empleado_id)) || {}; 
     const t = Number(r.tasa_bcv || 1); 
     const sM = Number(r.salario_minimo_bs || 130);
+    const bonoAlimPagado = getBonoAlimPagadoNomina(r);
     const sm = Number(r.salario_base || 0); 
-    const bam = Number(r.bono_alimentacion || 0); 
+    const bam = Number(r.bono_alimentacion || 0); // referencia mensual
     const oim = Number(r.otros_ingresos || 0); 
-    const sim = sm + bam + oim;
-    const sqb = (sm / 2) * t; const bab = (bam / 2) * t; const oib = (oim / 2) * t; 
+    const base = (sm/2) + bonoAlimPagado + (oim/2);
+    const diaPeriodo = base / 15;
+    const sqb = (sm / 2) * t; const bab = bonoAlimPagado * t; const oib = (oim / 2) * t; 
     const oab = Number(r.otras_asignaciones || 0) * t; const tab = sqb + bab + oib + oab;
     let sso = Number(r.ivss_usd || 0) * t; if(sso === 0 && sm > 0) sso = (Math.min(sm * t, 5 * sM) * 12 / 52) * 0.04 * 2;
     let lph = Number(r.faov_usd || 0) * t; if(lph === 0 && sm > 0) lph = ((sm * t) * 0.01) / 2;
     let rpe = Number(r.rpe_usd || 0) * t; if(rpe === 0 && sm > 0) rpe = (Math.min(sm * t, 10 * sM) * 12 / 52) * 0.005 * 2;
-    const dfb = ((sim / 30) * Number(r.dias_faltantes || 0)) * t; 
-    const hdb = (((sim / 30) / 8) * Number(r.horas_descuento || 0)) * t;
+    const dfb = (diaPeriodo * Number(r.dias_faltantes || 0)) * t; 
+    const hdb = ((diaPeriodo / 8) * Number(r.horas_descuento || 0)) * t;
     const prb = (Number(r.prestamos || 0) + Number(r.adelantos || 0)) * t; 
     const odb = Number(r.otros_descuentos || 0) * t;
     const tdb = dfb + sso + lph + rpe + prb + odb + hdb; 
@@ -1888,15 +1958,17 @@ function generarHTMLReciboSolo(r, fecha) {
     const dfv = Number(r.dias_faltantes || 0); const hdv = Number(r.horas_descuento || 0);
     const odv = Number(r.otros_descuentos || 0); const adv = Number(r.adelantos || 0);
     const prv = Number(r.prestamos || 0); const oav = Number(r.otras_asignaciones || 0);
-    const diav = sim / 30;
-    const salarioBs = ((sm / 30) * (15 - dfv)) * t - (sso + lph + rpe);
-    const alimBs = ((bam / 30) * (15 - dfv)) * t;
-    const subsBs = ((oim / 30) * (15 - dfv)) * t + (oav * t) - (((diav / 8) * hdv) * t) - (odv * t) - (adv * t) - (prv * t);
+    const salarioBs = ((sm / 2) * (15 - dfv) / 15) * t - (sso + lph + rpe);
+    const alimBs = (bonoAlimPagado / 15) * (15 - dfv) * t;
+    const subsBs = ((oim / 2) * (15 - dfv) / 15) * t + (oav * t) - (((diaPeriodo / 8) * hdv) * t) - (odv * t) - (adv * t) - (prv * t);
     const [y, m, d] = fecha.split('-'); 
     const fO = new Date(y, m - 1, d); 
     const qT = fO.getDate() <= 15 ? '1ERA QUINCENA' : '2DA QUINCENA'; 
     const mN = fO.toLocaleString('es-ES', { month: 'long' }).toUpperCase(); 
     const tP = `RECIBO DE PAGO ${qT} DE ${mN} ${y}`;
+    const filaBono = bonoAlimPagado > 0
+        ? `<tr><td class="px-1.5 py-0.5" colspan="2">Bono de alimentación</td><td class="px-1.5 py-0.5 text-right font-mono">${fNum(bab)}</td></tr>`
+        : `<tr class="opacity-70"><td class="px-1.5 py-0.5 text-slate-500" colspan="2">Bono de alimentación <span class="text-[7.5px]">(no aplica esta quincena)</span></td><td class="px-1.5 py-0.5 text-right font-mono text-slate-500">Bs. 0.00</td></tr>`;
     return `<div class="recibo-card bg-white text-black p-3 rounded-lg shadow-xl border border-slate-300 font-sans max-w-3xl mx-auto w-full">
     <div><div class="flex justify-between items-start mb-1 pb-0.5 border-b border-black">
     <div><h2 class="text-xl font-black tracking-widest text-black uppercase">${appState.parametros.nombre_empresa.split('/')[0].trim()}</h2></div>
@@ -1908,7 +1980,7 @@ function generarHTMLReciboSolo(r, fecha) {
     <tr><td class="bg-slate-100 px-1.5 py-0.5 border-r border-black font-bold">SALARIO MENSUAL</td><td colspan="3" class="px-1.5 py-0.5 font-bold">${fNum(sm*t)} Bs. ($${sm.toFixed(2)}) | Tasa: ${t.toFixed(2)} Bs/$</td></tr></table>
     <table class="w-full text-[10px] border border-black mb-1"><thead><tr class="bg-[#dbece0] font-bold border-b border-black"><th class="px-1.5 py-0.5 text-left border-r border-black" colspan="2">ASIGNACIÓN</th><th class="px-1.5 py-0.5 text-right w-28">MONTO (BS)</th></tr></thead>
     <tbody class="divide-y divide-slate-300"><tr><td class="px-1.5 py-0.5">Salario quincenal (15 d)</td><td class="px-1.5 py-0.5 text-center w-12">15 d</td><td class="px-1.5 py-0.5 text-right font-mono">${fNum(sqb)}</td></tr>
-    <tr><td class="px-1.5 py-0.5" colspan="2">Bono de alimentación</td><td class="px-1.5 py-0.5 text-right font-mono">${fNum(bab)}</td></tr>
+    ${filaBono}
     <tr><td class="px-1.5 py-0.5" colspan="2">Subsidio especial no obligatorio</td><td class="px-1.5 py-0.5 text-right font-mono">${fNum(oib+oab)}</td></tr></tbody>
     <tfoot><tr class="font-bold border-t border-black bg-slate-50"><td class="px-1.5 py-0.5" colspan="2">TOTAL ASIGNACIONES</td><td class="px-1.5 py-0.5 text-right font-mono font-bold">${fNum(tab)}</td></tr></tfoot></table>
     <table class="w-full text-[9.5px] border border-black mb-1"><tbody class="divide-y divide-slate-200">
