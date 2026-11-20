@@ -693,7 +693,7 @@ async function crearNuevaEmpresa() {
             if (!nuevoId) throw new Error('La BD no devolvió el id de la empresa');
         } catch (e) {
             console.warn('Error creando empresa en BD:', e);
-            return showToast('No se pudo grabar la empresa. Ejecute el SQL Multiempresa actualizado en Supabase (habilita escritura de public.empresas) y vuelva a intentar.', 'error');
+            return showToast('Sigue sin poder escribir en public.empresas (RLS). Ejecute el archivo SQL-FIX-EMPRESAS.sql en Supabase → SQL Editor y vuelva a intentar.', 'error');
         }
     }
 
@@ -1148,7 +1148,7 @@ function abrirModalEsquemaSqlMulti() {
         modal.className = 'fixed inset-0 bg-slate-950/85 backdrop-blur-sm hidden items-center justify-center p-4 z-50';
         modal.innerHTML = `<div class="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl">
           <div class="flex justify-between items-center p-4 border-b border-slate-800"><h3 class="text-base font-bold text-white"><i class="fa-solid fa-layer-group text-indigo-400 mr-2"></i>SQL Multiempresa: varias empresas en la misma base</h3><button onclick="closeModal('modal-esquema-sql-multi')" class="text-slate-400 hover:text-white p-1"><i class="fa-solid fa-xmark text-lg"></i></button></div>
-          <div class="p-4 overflow-auto flex-1"><p class="text-[11px] text-slate-400 mb-2">Script para habilitar el uso multiempresa con <code>empresa_id</code> en la misma base de datos (mismo proyecto Supabase). Copie y ejecútelo en <strong>Supabase → SQL Editor</strong>, luego use "Verificar esquema".</p><textarea id="esquema-sql-multi-text" readonly class="w-full h-[55vh] bg-slate-950 border border-slate-800 rounded-lg p-3 text-[11px] font-mono text-slate-200"></textarea></div>
+          <div class="p-4 overflow-auto flex-1"><p class="text-[11px] text-slate-400 mb-2">Script para habilitar el uso multiempresa con <code>empresa_id</code> en la misma base de datos (mismo proyecto Supabase). Copie y ejecútelo en <strong>Supabase → SQL Editor</strong>, luego use "Verificar esquema". Si al crear empresas sigue saliendo el aviso de RLS, ejecute también el archivo <code>SQL-FIX-EMPRESAS.sql</code> incluido en la entrega.</p><textarea id="esquema-sql-multi-text" readonly class="w-full h-[55vh] bg-slate-950 border border-slate-800 rounded-lg p-3 text-[11px] font-mono text-slate-200"></textarea></div>
           <div class="p-4 border-t border-slate-800 flex justify-end gap-2"><button onclick="copiarSqlMulti()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-4 py-2 rounded-lg"><i class="fa-solid fa-copy mr-1"></i>Copiar SQL</button><button onclick="closeModal('modal-esquema-sql-multi')" class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold px-4 py-2 rounded-lg">Cerrar</button></div>
         </div>`;
         document.body.appendChild(modal);
