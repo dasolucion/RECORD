@@ -34,6 +34,9 @@ async function prepararMultiempresaParaCarga() {
     }
     if (appState.multiempresaActivo && typeof cargarEmpresasDesdeDb === 'function') {
         await cargarEmpresasDesdeDb();
+        if (typeof sincronizarEmpresasLocalesConDb === 'function') {
+            await sincronizarEmpresasLocalesConDb();
+        }
     }
 }
 
@@ -227,9 +230,14 @@ async function fetchAllData() {
     // --- Parámetros corporativos + features_config ---
     // En multiempresa cada empresa tiene su propia fila; en despliegues de una sola empresa se usa id=1.
     const empresaIdActiva = (typeof obtenerEmpresaIdActiva === 'function') ? obtenerEmpresaIdActiva() : null;
+    const rifActivo = String((appState.parametros && appState.parametros.rif_empresa) || '').toUpperCase();
     let queryParams = supabaseClient.from('parametros_config').select('*');
     if (appState.multiempresaActivo && empresaIdActiva) {
         queryParams = queryParams.eq('empresa_id', empresaIdActiva);
+    } else if (appState.multiempresaActivo && rifActivo && rifActivo !== 'J-00000000-0') {
+        // Empresa guardada sólo en este equipo: buscar su config por RIF. NUNCA caer a id=1,
+        // porque eso hacía que al seleccionarla el sistema regresara a Recordplast.
+        queryParams = queryParams.eq('rif_empresa', rifActivo);
     } else {
         queryParams = queryParams.eq('id', 1);
     }

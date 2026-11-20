@@ -24,6 +24,7 @@ let appState = {
     empresaActiva: null,   // RIF de la empresa activa
     empresaActivaId: null, // id de la empresa activa en public.empresas
     multiempresaActivo: false, // true cuando la BD expone la tabla empresas (una BD, varias empresas)
+    empresasPendientesDb: [],  // RIFs que existen sólo en localStorage y no se pudieron grabar en Supabase
     empresaRecienCreada: false, // true cuando se acaba de registrar una empresa nueva (estado en blanco, sin datos previos)
     estadoConexion: 'sinverificar', // sinverificar | comprobando | conectado | desconectado | cache | demo
     modoDatos: null,       // 'demo' | 'db' (null = auto según config)
@@ -587,6 +588,7 @@ async function cargarEmpresasDesdeDb() {
         });
         appState.empresas = Object.keys(mapa).map(k => mapa[k]);
         appState.multiempresaActivo = true;
+        appState.empresasPendientesDb = appState.empresas.filter(e => e && e.rif && !e.id).map(e => e.rif);
         const rifActivo = String(appState.parametros.rif_empresa || '').toUpperCase();
         const activa = appState.empresas.find(e => String(e.rif).toUpperCase() === rifActivo);
         appState.empresaActivaId = activa ? activa.id : null;
@@ -608,6 +610,43 @@ async function guardarEmpresaEnDb(nombre, rif) {
     if (datos.length && datos[0].id) return datos[0].id;
     const busq = await supabaseClient.from('empresas').select('id').eq('rif', rif).maybeSingle();
     return busq && busq.data ? busq.data.id : null;
+}
+
+// Algunas empresas pueden existir sólo en el localStorage de un equipo (versiones anteriores
+// o altas fallidas por RLS). Al conectar, se intenta registrarlas en Supabase para que dejen
+// de ser "fantasmas" y pasen a tener empresa_id real.
+async function sincronizarEmpresasLocalesConDb() {
+    if (esModoDemo() || !appState.multiempresaActivo || !supabaseClient) {
+        return { creadas: [], pendientes: [] };
+    }
+    const faltan = (appState.empresas || []).filter(e => e && e.rif && !e.id);
+    if (!faltan.length) {
+        appState.empresasPendientesDb = [];
+        return { creadas: [], pendientes: [] };
+    }
+    const creadas = [];
+    const pendientes = [];
+    for (const e of faltan) {
+        try {
+            const id = await guardarEmpresaEnDb(e.nombre || e.rif, e.rif);
+            if (id) {
+                e.id = id;
+                e.activo = true;
+                creadas.push(e.rif);
+            } else {
+                pendientes.push(e.rif);
+            }
+        } catch (err) {
+            console.warn('No se pudo sincronizar empresa local:', e.rif, err);
+            pendientes.push(e.rif);
+        }
+    }
+    if (creadas.length) lsSet('nomina_empresas', JSON.stringify(appState.empresas));
+    appState.empresasPendientesDb = pendientes;
+    const rifActivo = String(appState.parametros.rif_empresa || '').toUpperCase();
+    const activa = (appState.empresas || []).find(e => String(e.rif).toUpperCase() === rifActivo);
+    appState.empresaActivaId = activa ? (activa.id || null) : null;
+    return { creadas, pendientes };
 }
 
 function guardarEmpresaActivaEnRegistro() {
@@ -640,8 +679,12 @@ function renderSelectorEmpresas() {
     if (rifActual && !lista.some(e => String(e.rif).toUpperCase() === rifActual)) {
         lista.unshift({ rif: appState.parametros.rif_empresa, nombre: appState.parametros.nombre_empresa });
     }
+    const pendientes = appState.empresasPendientesDb || [];
     sel.innerHTML = lista.length
-        ? lista.map(e => `<option value="${e.rif}" ${String(e.rif).toUpperCase() === rifActual ? 'selected' : ''}>${e.nombre || e.rif} — ${e.rif}</option>`).join('')
+        ? lista.map(e => {
+            const aviso = pendientes.some(r => String(r).toUpperCase() === String(e.rif).toUpperCase()) ? ' ⚠ sólo local' : '';
+            return `<option value="${e.rif}" ${String(e.rif).toUpperCase() === rifActual ? 'selected' : ''}>${e.nombre || e.rif} — ${e.rif}${aviso}</option>`;
+        }).join('')
         : `<option value="">(Sin empresas registradas)</option>`;
 }
 
@@ -657,10 +700,14 @@ function abrirSelectorEmpresaDb() {
     if (!cont || !modal) return;
     const lista = (Array.isArray(appState.empresas) ? appState.empresas : []).filter(e => e && e.rif).slice();
     if (!lista.length) { closeModal('modal-selector-empresa'); return; }
-    cont.innerHTML = lista.map(e => `<button onclick="elegirEmpresa('${String(e.rif).replace(/'/g, "''")}')" class="w-full text-left bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 transition">
+    const pendientes = appState.empresasPendientesDb || [];
+    cont.innerHTML = lista.map(e => {
+        const aviso = pendientes.some(r => String(r).toUpperCase() === String(e.rif).toUpperCase());
+        return `<button onclick="elegirEmpresa('${String(e.rif).replace(/'/g, "''")}')" class="w-full text-left bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 transition">
         <span class="text-xs font-bold text-slate-100">${esc(e.nombre || e.rif)}</span>
-        <span class="text-[11px] text-slate-400 font-mono">${esc(e.rif)}</span>
-    </button>`).join('');
+        <span class="text-[11px] ${aviso ? 'text-amber-400' : 'text-slate-400'} font-mono">${aviso ? '⚠ sólo local · ' : ''}${esc(e.rif)}</span>
+    </button>`;
+    }).join('');
     openModal('modal-selector-empresa');
 }
 
@@ -737,8 +784,29 @@ async function crearNuevaEmpresa() {
 async function cambiarEmpresaActiva(rif) {
     const entrada = (appState.empresas || []).find(e => String(e.rif).toUpperCase() === String(rif).toUpperCase());
     if (!entrada) return showToast('Empresa no encontrada en el registro', 'error');
+
+    // Si la empresa existe sólo en este equipo, intentar grabarla ahora en Supabase.
+    let pendienteDb = false;
+    if (!entrada.id && !esModoDemo() && supabaseClient && appState.multiempresaActivo) {
+        try {
+            const idDb = await guardarEmpresaEnDb(entrada.nombre || entrada.rif, entrada.rif);
+            if (idDb) {
+                entrada.id = idDb;
+                entrada.activo = true;
+                lsSet('nomina_empresas', JSON.stringify(appState.empresas));
+                const ix = (appState.empresasPendientesDb || []).indexOf(entrada.rif);
+                if (ix !== -1) appState.empresasPendientesDb.splice(ix, 1);
+            } else {
+                pendienteDb = true;
+            }
+        } catch (e) {
+            console.warn('No se pudo grabar la empresa al activarla:', e);
+            pendienteDb = true;
+        }
+    }
+
     // Si se activa una empresa recién creada, mantener estado en blanco; si es una empresa registrada, cargar sus datos.
-    const esEmpresaNueva = (lsGet('nomina_empresa_recien_creada') || '') === String(rif || '').toUpperCase();
+    const esEmpresaNueva = pendienteDb || (lsGet('nomina_empresa_recien_creada') || '') === String(rif || '').toUpperCase();
     appState.empresaRecienCreada = esEmpresaNueva;
     if (!esEmpresaNueva) lsRemove('nomina_empresa_recien_creada');
     // Siempre limpiar memoria y cachés para no mezclar datos de la empresa anterior.
@@ -756,6 +824,11 @@ async function cambiarEmpresaActiva(rif) {
     lsSet('nomina_empresa_activa', entrada.rif);
     if (typeof actualizarClienteSupabase === 'function') actualizarClienteSupabase();
     aplicarParametrosEnVista();
+
+    if (pendienteDb) {
+        showToast(`Empresa ${entrada.nombre} activada sólo en este equipo. Ejecute SQL-FIX-EMPRESAS.sql para grabarla en Supabase.`, 'error');
+        return;
+    }
     showToast(`Empresa activa: ${appState.parametros.nombre_empresa}`);
     if (typeof fetchAllData === 'function' && !esEmpresaNueva) fetchAllData().catch(console.warn);
 }
