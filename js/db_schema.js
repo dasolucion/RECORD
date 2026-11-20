@@ -292,23 +292,33 @@ function generarSqlMultiEmpresa() {
         L.push(`alter table public.${t} add column if not exists empresa_id bigint references public.empresas(id);`);
     }
     L.push('');
-    L.push('-- 4) Crear la empresa inicial (datos actuales) y vincular la config');
-    L.push("insert into public.empresas (nombre, rif, activo) values ('Recordplast', 'J-50685235-7', true) on conflict (rif) do update set nombre = excluded.nombre, activo = excluded.activo;");
-    L.push("update public.parametros_config set empresa_id = (select id from public.empresas where rif = 'J-50685235-7' limit 1) where id = 1;");
+    L.push('-- 3b) Permisos: el sistema es estático y usa la anon key, por lo que debe poder');
+    L.push('--     registrar empresas nuevas desde cualquier PC. Si RLS está activo sin políticas,');
+    L.push('--     el INSERT falla con "new row violates row-level security policy".');
+    L.push('alter table public.empresas disable row level security;');
+    L.push('grant select, insert, update, delete on public.empresas to anon, authenticated;');
+    L.push('');
+    L.push('-- 4) Crear la empresa inicial desde la configuración actual (sin RIF hardcodeado)');
+    L.push('insert into public.empresas (nombre, rif, activo)');
+    L.push("select coalesce(nullif(nombre_empresa, ''), 'EMPRESA'), coalesce(nullif(rif_empresa, ''), 'J-00000000-0'), true");
+    L.push('from public.parametros_config where id = 1');
+    L.push("on conflict (rif) do update set nombre = excluded.nombre, activo = excluded.activo;");
+    L.push('update public.parametros_config set empresa_id = (select id from public.empresas where rif = parametros_config.rif_empresa limit 1) where id = 1 and empresa_id is null;');
     L.push('');
     L.push('-- 5) Backfill de los datos existentes hacia la empresa creada');
-    L.push("update public.empleados set empresa_id = (select id from public.empresas where rif = 'J-50685235-7' limit 1) where empresa_id is null;");
-    L.push("update public.nominas set empresa_id = (select id from public.empresas where rif = 'J-50685235-7' limit 1) where empresa_id is null;");
-    L.push("update public.departamentos set empresa_id = (select id from public.empresas where rif = 'J-50685235-7' limit 1) where empresa_id is null;");
-    L.push("update public.cargos set empresa_id = (select id from public.empresas where rif = 'J-50685235-7' limit 1) where empresa_id is null;");
+    const idEmpresaInicial = "(select id from public.empresas where rif = (select rif_empresa from public.parametros_config where id = 1) limit 1)";
+    L.push(`update public.empleados set empresa_id = ${idEmpresaInicial} where empresa_id is null;`);
+    L.push(`update public.nominas set empresa_id = ${idEmpresaInicial} where empresa_id is null;`);
+    L.push(`update public.departamentos set empresa_id = ${idEmpresaInicial} where empresa_id is null;`);
+    L.push(`update public.cargos set empresa_id = ${idEmpresaInicial} where empresa_id is null;`);
     for (const t of tablasNegocio) {
         if (['departamentos', 'cargos', 'empleados', 'nominas'].includes(t)) continue;
-        L.push(`update public.${t} set empresa_id = (select id from public.empresas where rif = 'J-50685235-7' limit 1) where empresa_id is null;`);
+        L.push(`update public.${t} set empresa_id = ${idEmpresaInicial} where empresa_id is null;`);
     }
     L.push('');
-    L.push('-- 6) Regla de aislamiento por empresa (RLS opcional, recomendado para producción)');
-    L.push('alter table public.empleados enable row level security;');
-    L.push('-- create policy "empleados_empresa" on public.empleados for all using (empresa_id = (select id from public.empresas limit 1)) with check (empresa_id = (select id from public.empresas limit 1));');
+    L.push('-- 6) El filtro por empresa se aplica en el cliente (appState.multiempresaActivo).');
+    L.push('--     No activar RLS en tablas de negocio sin antes crear políticas por empresa_id,');
+    L.push('--     porque la app usa una sola anon key para todos los usuarios.');
     L.push('');
     return L.join('\n');
 }

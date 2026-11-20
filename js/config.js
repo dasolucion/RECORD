@@ -90,6 +90,52 @@ function getSupabaseClient() {
     return supabaseClient;
 }
 
+// Tablas que Conviven con `empresa_id` cuando el despliegue usa multiempresa en una sola BD.
+const TABLAS_POR_EMPRESA = [
+    'departamentos', 'cargos', 'empleados', 'nominas', 'historico_salarios', 'vacaciones',
+    'utilidades', 'prestaciones', 'antiguedad', 'anticipos_prestaciones', 'prestamos_anticipos',
+    'prestamos_abonos', 'asistencia_registros', 'justificativos_faltas', 'expediente_documentos',
+    'prenomina_borrador', 'firmas_recibos', 'tokens_portal_empleado', 'solicitudes_ari'
+];
+
+// Envuelve el query builder para que, en modo multiempresa, TODA lectura filtre por la empresa
+// activa y TODA escritura le asigne su empresa_id. Así no hay que tocar cada pantalla.
+function envolverClientePorEmpresa(client) {
+    if (!client || client.__envueltoPorEmpresa) return client;
+    const fromOriginal = client.from.bind(client);
+    client.from = function (tabla) {
+        const qb = fromOriginal(tabla);
+        const porEmpresa = TABLAS_POR_EMPRESA.indexOf(tabla) !== -1;
+        const idActivo = () => (typeof obtenerEmpresaIdActiva === 'function') ? obtenerEmpresaIdActiva() : null;
+        if (porEmpresa) {
+            const inyectar = (fnOriginal) => function (valores, opciones) {
+                const id = idActivo();
+                if (id) {
+                    if (Array.isArray(valores)) {
+                        valores = valores.map(v => (v && typeof v === 'object') ? Object.assign({}, v, { empresa_id: v.empresa_id || id }) : v);
+                    } else if (valores && typeof valores === 'object') {
+                        valores = Object.assign({}, valores, { empresa_id: valores.empresa_id || id });
+                    }
+                }
+                return fnOriginal(valores, opciones);
+            };
+            if (typeof qb.insert === 'function') qb.insert = inyectar(qb.insert.bind(qb));
+            if (typeof qb.upsert === 'function') qb.upsert = inyectar(qb.upsert.bind(qb));
+            if (typeof qb.update === 'function') qb.update = inyectar(qb.update.bind(qb));
+            const selectOriginal = qb.select.bind(qb);
+            qb.select = function (columnas, opciones) {
+                const salida = selectOriginal(columnas, opciones);
+                const id = idActivo();
+                if (id && salida && typeof salida.eq === 'function') salida.eq('empresa_id', id);
+                return salida;
+            };
+        }
+        return qb;
+    };
+    client.__envueltoPorEmpresa = true;
+    return client;
+}
+
 function actualizarClienteSupabase() {
     // Forzar recreación según modo/config actual
     if (esModoDemoActivo() && typeof createDemoSupabaseClient === 'function') {
@@ -98,11 +144,12 @@ function actualizarClienteSupabase() {
         return supabaseClient;
     }
     _sbConfig = { url: null, key: null, mode: null };
-    return getSupabaseClient();
+    const cliente = getSupabaseClient();
+    return envolverClientePorEmpresa(cliente);
 }
 
 // Inicializar cliente al cargar
-supabaseClient = getSupabaseClient();
+supabaseClient = envolverClientePorEmpresa(getSupabaseClient());
 
 // --- Usuarios de respaldo local (si Supabase no responde o está vacío) ---
 const USUARIOS_DEFAULT = [

@@ -20,8 +20,10 @@ let appState = {
         supabase_url: '',
         supabase_anon_key: ''
     },
-    empresas: [],          // Registro local de empresas (multiempresa)
+    empresas: [],          // Registro de empresas (multiempresa): se sincroniza con public.empresas
     empresaActiva: null,   // RIF de la empresa activa
+    empresaActivaId: null, // id de la empresa activa en public.empresas
+    multiempresaActivo: false, // true cuando la BD expone la tabla empresas (una BD, varias empresas)
     empresaRecienCreada: false, // true cuando se acaba de registrar una empresa nueva (estado en blanco, sin datos previos)
     estadoConexion: 'sinverificar', // sinverificar | comprobando | conectado | desconectado | cache | demo
     modoDatos: null,       // 'demo' | 'db' (null = auto según config)
@@ -467,8 +469,29 @@ async function guardarParametrosGenerales() {
     // Recrear cliente si aplica
     if (typeof actualizarClienteSupabase === 'function') actualizarClienteSupabase();
 
+    // En multiempresa cada empresa tiene su propia fila de parámetros (empresa_id).
+    // La empresa inicial conserva id=1 para no romper despliegues de una sola empresa.
+    let idConfig = 1;
+    const empresaId = obtenerEmpresaIdActiva();
+    if (appState.multiempresaActivo && empresaId) {
+        const cfgEmpresa = await safeQuery(
+            supabaseClient.from('parametros_config').select('id').eq('empresa_id', empresaId).maybeSingle(),
+            'config_empresa'
+        );
+        if (cfgEmpresa && cfgEmpresa.id) {
+            idConfig = cfgEmpresa.id;
+        } else {
+            const maxCfg = await safeQuery(
+                supabaseClient.from('parametros_config').select('id').order('id', { ascending: false }).limit(1).maybeSingle(),
+                'config_max_id'
+            );
+            idConfig = (maxCfg && maxCfg.id ? Number(maxCfg.id) : 1) + 1;
+        }
+    }
+
     const payload = {
-        id: 1,
+        id: idConfig,
+        ...(appState.multiempresaActivo && empresaId ? { empresa_id: empresaId } : {}),
         nombre_empresa: appState.parametros.nombre_empresa,
         rif_empresa: appState.parametros.rif_empresa,
         dias_utilidades: appState.parametros.dias_utilidades,
@@ -516,8 +539,76 @@ async function guardarParametrosGenerales() {
 }
 
 // ============================================================
-// MULTIEMPRESA — Registro local, selector y creación rápida
+// MULTIEMPRESA — Registro en Supabase + selector + creación rápida
 // ============================================================
+
+const CACHES_NEGOCIO = [
+    'nomina_departamentos', 'nomina_cargos', 'nomina_empleados', 'nomina_procesadas',
+    'nomina_historico_salarios', 'nomina_vacaciones_cache', 'nomina_utilidades',
+    'nomina_prestaciones', 'nomina_anticipos_cache', 'nomina_antiguedad_cache',
+    'nomina_usuarios', 'nomina_tasas_mensuales', 'nomina_features_config',
+    'nomina_roles_permisos', 'nomina_borrador_global'
+];
+
+function limpiarCachesNegocio() {
+    CACHES_NEGOCIO.forEach(k => lsRemove(k));
+}
+
+function obtenerEmpresaIdActiva() {
+    if (!appState.multiempresaActivo || esModoDemo()) return null;
+    const rif = String((appState.parametros && appState.parametros.rif_empresa) || '').toUpperCase();
+    const entrada = (appState.empresas || []).find(e => e && String(e.rif || '').toUpperCase() === rif);
+    if (entrada && entrada.id) return Number(entrada.id);
+    return appState.empresaActivaId ? Number(appState.empresaActivaId) : null;
+}
+
+async function cargarEmpresasDesdeDb() {
+    if (esModoDemo() || !supabaseClient || !appState.esquemaOk) return false;
+    try {
+        const res = await supabaseClient.from('empresas').select('id, nombre, rif, activo').order('id');
+        if (res && res.error) return false;
+        const filas = Array.isArray(res && res.data) ? res.data : [];
+        const mapa = {};
+        (appState.empresas || []).forEach(e => {
+            if (e && e.rif) mapa[String(e.rif).toUpperCase()] = e;
+        });
+        filas.forEach(f => {
+            const rif = String(f.rif || '').toUpperCase();
+            if (!rif) return;
+            const prev = mapa[rif] || {};
+            mapa[rif] = {
+                ...prev,
+                id: f.id,
+                rif: f.rif,
+                nombre: f.nombre || prev.nombre || f.rif,
+                activo: f.activo !== false,
+                parametros: prev.parametros || null
+            };
+        });
+        appState.empresas = Object.keys(mapa).map(k => mapa[k]);
+        appState.multiempresaActivo = true;
+        const rifActivo = String(appState.parametros.rif_empresa || '').toUpperCase();
+        const activa = appState.empresas.find(e => String(e.rif).toUpperCase() === rifActivo);
+        appState.empresaActivaId = activa ? activa.id : null;
+        lsSet('nomina_empresas', JSON.stringify(appState.empresas));
+        return true;
+    } catch (e) {
+        console.warn('No se pudo cargar el registro de empresas:', e);
+        return false;
+    }
+}
+
+async function guardarEmpresaEnDb(nombre, rif) {
+    if (esModoDemo() || !supabaseClient || !appState.multiempresaActivo) return null;
+    const res = await supabaseClient.from('empresas')
+        .upsert([{ nombre, rif, activo: true }], { onConflict: 'rif' })
+        .select();
+    if (res && res.error) throw res.error;
+    const datos = Array.isArray(res && res.data) ? res.data : [];
+    if (datos.length && datos[0].id) return datos[0].id;
+    const busq = await supabaseClient.from('empresas').select('id').eq('rif', rif).maybeSingle();
+    return busq && busq.data ? busq.data.id : null;
+}
 
 function guardarEmpresaActivaEnRegistro() {
     const rif = (appState.parametros.rif_empresa || '').trim();
@@ -525,10 +616,11 @@ function guardarEmpresaActivaEnRegistro() {
     if (!Array.isArray(appState.empresas)) appState.empresas = [];
     const copia = JSON.parse(JSON.stringify(appState.parametros));
     const idx = appState.empresas.findIndex(e => String(e.rif).toUpperCase() === rif.toUpperCase());
-    const entrada = { rif, nombre: appState.parametros.nombre_empresa, parametros: copia };
+    const entrada = { ...(idx >= 0 ? appState.empresas[idx] : {}), rif, nombre: appState.parametros.nombre_empresa, parametros: copia };
     if (idx >= 0) appState.empresas[idx] = entrada;
     else appState.empresas.push(entrada);
     appState.empresaActiva = rif;
+    appState.empresaActivaId = entrada.id || null;
     lsSet('nomina_empresas', JSON.stringify(appState.empresas));
     lsSet('nomina_empresa_activa', rif);
 }
@@ -593,6 +685,18 @@ async function crearNuevaEmpresa() {
         return cambiarEmpresaActiva(rif);
     }
 
+    // Grabar en public.empresas para que la empresa exista en TODOS los equipos, no sólo aquí.
+    let nuevoId = null;
+    if (!esModoDemo() && appState.multiempresaActivo) {
+        try {
+            nuevoId = await guardarEmpresaEnDb(nombre, rif);
+            if (!nuevoId) throw new Error('La BD no devolvió el id de la empresa');
+        } catch (e) {
+            console.warn('Error creando empresa en BD:', e);
+            return showToast('No se pudo grabar la empresa. Ejecute el SQL Multiempresa actualizado en Supabase (habilita escritura de public.empresas) y vuelva a intentar.', 'error');
+        }
+    }
+
     // Nueva empresa: solo RIF + razón social. El resto se completa luego en esta misma pestaña.
     appState.parametros = {
         ...appState.parametros,
@@ -603,34 +707,43 @@ async function crearNuevaEmpresa() {
         riesgo_ivss: 9,
         aplica_lpp: true
     };
-    // Empresa recién creada: estado en blanco sin datos previos (no se borra la base de datos,
-    // solo se muestra el estado vacío para cargar empleados/cargos/departamentos de la nueva empresa).
+    const entradaNueva = { id: nuevoId, rif, nombre, activo: true, parametros: JSON.parse(JSON.stringify(appState.parametros)) };
+    const idx = (appState.empresas || []).findIndex(e => String(e.rif).toUpperCase() === rif);
+    if (idx >= 0) appState.empresas[idx] = { ...appState.empresas[idx], ...entradaNueva };
+    else appState.empresas.push(entradaNueva);
+    appState.empresaActiva = rif;
+    appState.empresaActivaId = nuevoId;
+
+    // Empresa recién creada: estado en blanco. También se limpian las cachés del navegador
+    // para que no reaparezcan empleados/nóminas de la empresa anterior al recargar.
     appState.empresaRecienCreada = true;
     lsSet('nomina_empresa_recien_creada', rif);
+    limpiarCachesNegocio();
     if (typeof limpiarEstadoNegocio === 'function') limpiarEstadoNegocio();
     if (typeof renderDashboard === 'function') renderDashboard();
     if (typeof renderDepartamentos === 'function') renderDepartamentos();
     if (typeof renderCargos === 'function') renderCargos();
     if (typeof renderEmpleados === 'function') renderEmpleados();
+    if (typeof renderSelectorEmpresas === 'function') renderSelectorEmpresas();
 
     guardarEmpresaActivaEnRegistro();
     lsSet('nomina_parametros', JSON.stringify(appState.parametros));
     aplicarParametrosEnVista();
     closeModal('modal-nueva-empresa');
-    await guardarParametrosGenerales();
+    if (!esModoDemo()) await guardarParametrosGenerales();
+    showToast(`Empresa ${nombre} activa. Puede cargar sus datos desde cero.`);
 }
 
 async function cambiarEmpresaActiva(rif) {
     const entrada = (appState.empresas || []).find(e => String(e.rif).toUpperCase() === String(rif).toUpperCase());
-    if (!entrada) return showToast('Empresa no encontrada en el registro local', 'error');
+    if (!entrada) return showToast('Empresa no encontrada en el registro', 'error');
     // Si se activa una empresa recién creada, mantener estado en blanco; si es una empresa registrada, cargar sus datos.
     const esEmpresaNueva = (lsGet('nomina_empresa_recien_creada') || '') === String(rif || '').toUpperCase();
     appState.empresaRecienCreada = esEmpresaNueva;
     if (!esEmpresaNueva) lsRemove('nomina_empresa_recien_creada');
-    if (!esEmpresaNueva) {
-        // Limpiar estado previo para no mezclar datos entre empresas al cambiar.
-        limpiarEstadoNegocio();
-    }
+    // Siempre limpiar memoria y cachés para no mezclar datos de la empresa anterior.
+    limpiarCachesNegocio();
+    limpiarEstadoNegocio();
     appState.parametros = {
         ...appState.parametros,
         ...(entrada.parametros || {}),
@@ -638,12 +751,13 @@ async function cambiarEmpresaActiva(rif) {
         nombre_empresa: entrada.nombre || entrada.parametros?.nombre_empresa || entrada.rif
     };
     appState.empresaActiva = entrada.rif;
+    appState.empresaActivaId = entrada.id || null;
     lsSet('nomina_parametros', JSON.stringify(appState.parametros));
     lsSet('nomina_empresa_activa', entrada.rif);
     if (typeof actualizarClienteSupabase === 'function') actualizarClienteSupabase();
     aplicarParametrosEnVista();
     showToast(`Empresa activa: ${appState.parametros.nombre_empresa}`);
-    if (typeof fetchAllData === 'function') fetchAllData().catch(console.warn);
+    if (typeof fetchAllData === 'function' && !esEmpresaNueva) fetchAllData().catch(console.warn);
 }
 
 function establecerEstadoConexion(estado, detalle) {
