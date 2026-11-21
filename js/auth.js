@@ -287,7 +287,7 @@ function aplicarPermisosUI(raiz = document) {
     const controles = raiz.querySelectorAll('button, input:not([type="hidden"]), select, textarea, label[for^="input-"]');
 
     controles.forEach(control => {
-        if (control.closest('#modal-matriz-permisos, #modal-usuario, #login-screen, #sidebar')) return;
+        if (control.closest('#modal-matriz-permisos, #modal-usuario, #login-screen, #sidebar, #header-empresa-wrap')) return;
 
         // Cerrar un diálogo es navegación de interfaz, no una operación del módulo.
         // Debe seguir disponible aun si el perfil solo tiene permiso de consulta.
@@ -352,7 +352,7 @@ document.addEventListener('change', event => {
 
 document.addEventListener('click', event => {
     const control = event.target.closest('button, a, label');
-    if (!control || control.closest('#modal-matriz-permisos, #modal-usuario, #login-screen, #sidebar')) return;
+    if (!control || control.closest('#modal-matriz-permisos, #modal-usuario, #login-screen, #sidebar, #header-empresa-wrap')) return;
 
     // Cierre de modal permitido siempre, independientemente de los permisos CRUD.
     if (esControlCierreModal(control)) return;
