@@ -339,15 +339,8 @@ function cargarCacheLocal() {
         if (typeof renderPanelFeatureFlags === 'function') renderPanelFeatureFlags();
         if (typeof renderDashboard === 'function') renderDashboard();
 
-        if (typeof verificarConexionInicial === 'function') {
-            verificarConexionInicial().catch((e) => {
-                console.warn('Error reconectando:', e);
-                limpiarEstadoNegocio();
-                establecerEstadoConexion('desconectado', 'No se pudo reconectar. Verifique la conexión.');
-                aplicarParametrosEnVista();
-                if (typeof renderDashboard === 'function') renderDashboard();
-            });
-        }
+        // La verificación de conexión/esquema la orquesta iniciarAplicacion() en main.js
+        // ANTES de mostrar el login. No se lanza aquí para evitar dobles consultas.
         return;
     }
 
@@ -450,6 +443,9 @@ async function guardarParametrosGenerales() {
     if (rol !== 'master' && rol !== 'administrador') {
         return showToast('No tiene permisos para modificar parámetros', 'error');
     }
+    // Valores previos: sirven para detectar un cambio de nombre/RIF y reflejarlo en public.empresas.
+    const rifAnterior = String(appState.parametros.rif_empresa || '').trim().toUpperCase();
+    const nombreAnterior = appState.parametros.nombre_empresa || '';
     appState.parametros.nombre_empresa = gId('param-empresa-nombre').value || '';
     appState.parametros.rif_empresa = gId('param-empresa-rif').value || '';
     appState.parametros.dias_utilidades = parseInt(gId('param-dias-utilidades').value) || 30;
@@ -462,6 +458,34 @@ async function guardarParametrosGenerales() {
     // Persistencia local de configuración
     lsSet('nomina_parametros', JSON.stringify(appState.parametros));
     guardarEmpresaActivaEnRegistro();
+
+    // Si cambió el nombre o el RIF de la empresa activa, actualizar también public.empresas.
+    // Así el selector y el registro persistente dejan de mostrar el valor Antiguo.
+    const empresaIdActiva = obtenerEmpresaIdActiva() || (appState.empresaActivaId ? Number(appState.empresaActivaId) : null);
+    const rifNuevo = String(appState.parametros.rif_empresa || '').trim().toUpperCase();
+    const nombreNuevo = appState.parametros.nombre_empresa || '';
+    if (!esModoDemo() && appState.esquemaOk && empresaIdActiva &&
+        (rifNuevo !== rifAnterior || nombreNuevo !== nombreAnterior)) {
+        const duplicada = (appState.empresas || []).find(e =>
+            Number(e.id) !== Number(empresaIdActiva) && String(e.rif || '').toUpperCase() === rifNuevo
+        );
+        if (duplicada) {
+            showToast('Ese RIF ya pertenece a otra empresa. No se guardó el cambio de RIF.', 'error');
+            return;
+        }
+        try {
+            mostrarCargando('Actualizando datos de la empresa...');
+            await actualizarEmpresaEnDb(empresaIdActiva, nombreNuevo, rifNuevo);
+            appState.empresaActiva = rifNuevo;
+            lsSet('nomina_empresa_activa', rifNuevo);
+            lsSet('nomina_empresas', JSON.stringify(appState.empresas));
+        } catch (e) {
+            console.warn('No se pudo actualizar nombre/RIF en public.empresas:', e);
+            showToast('Parámetros guardados, pero no se pudo actualizar nombre/RIF en empresas: ' + (e.message || e), 'error');
+        } finally {
+            ocultarCargando();
+        }
+    }
 
     // Recrear cliente si aplica
     if (typeof actualizarClienteSupabase === 'function') actualizarClienteSupabase();
@@ -650,7 +674,9 @@ async function cargarEmpresasDesdeDb() {
 }
 
 async function guardarEmpresaEnDb(nombre, rif) {
-    if (esModoDemo() || !supabaseClient || !appState.multiempresaActivo) return null;
+    // Se permite crear la primera empresa adicional incluso si el despliegue venía
+    // en modo empresa única (multiempresaActivo = false).
+    if (esModoDemo() || !supabaseClient || !appState.esquemaOk) return null;
     const res = await supabaseClient.from('empresas')
         .upsert([{ nombre, rif, activo: true }], { onConflict: 'rif' })
         .select();
@@ -678,22 +704,36 @@ function guardarEmpresaActivaEnRegistro() {
 }
 
 function renderSelectorEmpresas() {
-    const sel = gId('param-empresa-selector');
-    if (!sel) return;
     const conectado = (typeof esConexionActiva === 'function') ? esConexionActiva() : appState.estadoConexion === 'conectado';
-    if (!conectado) {
-        sel.innerHTML = `<option value="">Sin conexión — conecte Supabase para cargar empresa</option>`;
-        sel.disabled = true;
-        return;
-    }
-    sel.disabled = false;
     // Sólo empresas reales de Supabase. Las empresas locales antiguas ya no se muestran.
     const lista = (Array.isArray(appState.empresas) ? appState.empresas : [])
         .filter(e => e && e.rif && (!appState.multiempresaActivo || e.id));
     const rifActual = String(appState.parametros.rif_empresa || '').trim().toUpperCase();
-    sel.innerHTML = lista.length
-        ? lista.map(e => `<option value="${e.rif}" ${String(e.rif).toUpperCase() === rifActual ? 'selected' : ''}>${e.nombre || e.rif} — ${e.rif}</option>`).join('')
+
+    const opciones = lista.length
+        ? lista.map(e => `<option value="${esc(String(e.rif))}" ${String(e.rif).toUpperCase() === rifActual ? 'selected' : ''}>${esc(e.nombre || e.rif)} — ${esc(e.rif)}</option>`).join('')
         : `<option value="">(Sin empresas registradas en la base de datos)</option>`;
+
+    const selParam = gId('param-empresa-selector');
+    if (selParam) {
+        if (!conectado) {
+            selParam.innerHTML = `<option value="">Sin conexión — conecte Supabase para cargar empresa</option>`;
+            selParam.disabled = true;
+        } else {
+            selParam.disabled = false;
+            selParam.innerHTML = opciones;
+        }
+    }
+
+    // Selector permanente en la cabecera: permite cambiar de empresa después del login.
+    const selHeader = gId('header-empresa-selector');
+    const wrapHeader = gId('header-empresa-wrap');
+    if (selHeader) selHeader.innerHTML = opciones;
+    if (wrapHeader) {
+        const visible = conectado && lista.length > 0;
+        wrapHeader.classList.toggle('hidden', !visible);
+        wrapHeader.classList.toggle('flex', visible);
+    }
 }
 
 function abrirModalNuevaEmpresa() {
@@ -713,11 +753,121 @@ function abrirSelectorEmpresaDb() {
         if (typeof showToast === 'function') showToast('No hay empresas visibles en la base de datos. Ejecute SQL-FIX-EMPRESAS.sql en Supabase.', 'error');
         return;
     }
-    cont.innerHTML = lista.map(e => `<button onclick="elegirEmpresa('${String(e.rif).replace(/'/g, "''")}')" class="w-full text-left bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 transition">
-        <span class="text-xs font-bold text-slate-100">${esc(e.nombre || e.rif)}</span>
-        <span class="text-[11px] text-slate-400 font-mono">${esc(e.rif)}</span>
-    </button>`).join('');
+    cont.innerHTML = lista.map(e => {
+        const rifAttr = String(e.rif).replace(/'/g, "''");
+        const botonEditar = e.id
+            ? `<button onclick="abrirModalEditarEmpresa(${Number(e.id)})" title="Editar nombre o RIF" class="shrink-0 bg-slate-800 hover:bg-indigo-600 border border-slate-700 text-slate-300 hover:text-white rounded-lg p-2.5 transition"><i class="fa-solid fa-pen text-xs"></i></button>`
+            : '';
+        return `<div class="flex items-center gap-2">
+            <button onclick="elegirEmpresa('${rifAttr}')" class="flex-1 text-left bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 transition">
+                <span class="text-xs font-bold text-slate-100">${esc(e.nombre || e.rif)}</span>
+                <span class="text-[11px] text-slate-400 font-mono">${esc(e.rif)}</span>
+            </button>
+            ${botonEditar}
+        </div>`;
+    }).join('');
     openModal('modal-selector-empresa');
+}
+
+function abrirModalEditarEmpresa(id) {
+    const empresa = (appState.empresas || []).find(e => Number(e.id) === Number(id));
+    if (!empresa) return showToast('Empresa no encontrada en el registro', 'error');
+    if (gId('editar-empresa-id')) gId('editar-empresa-id').value = empresa.id;
+    if (gId('editar-empresa-rif')) gId('editar-empresa-rif').value = empresa.rif || '';
+    if (gId('editar-empresa-nombre')) gId('editar-empresa-nombre').value = empresa.nombre || '';
+    closeModal('modal-selector-empresa');
+    openModal('modal-editar-empresa');
+}
+
+function abrirModalEditarEmpresaActiva() {
+    const id = obtenerEmpresaIdActiva() || appState.empresaActivaId || null;
+    const rifActivo = String(appState.parametros.rif_empresa || '').toUpperCase();
+    const empresa = (appState.empresas || []).find(e =>
+        (id && Number(e.id) === Number(id)) || String(e.rif || '').toUpperCase() === rifActivo
+    );
+    if (!empresa) {
+        // En modo empresa única sin id, se usa el formulario de Parámetros para corregir nombre/RIF.
+        if (gId('editar-empresa-id')) gId('editar-empresa-id').value = '';
+        if (gId('editar-empresa-rif')) gId('editar-empresa-rif').value = appState.parametros.rif_empresa || '';
+        if (gId('editar-empresa-nombre')) gId('editar-empresa-nombre').value = appState.parametros.nombre_empresa || '';
+        return openModal('modal-editar-empresa');
+    }
+    abrirModalEditarEmpresa(empresa.id);
+}
+
+async function actualizarEmpresaEnDb(id, nombre, rif) {
+    if (esModoDemo() || !supabaseClient || !appState.esquemaOk || !id) return false;
+    const res = await supabaseClient.from('empresas').update({ nombre, rif }).eq('id', id);
+    if (res && res.error) throw res.error;
+    return true;
+}
+
+async function guardarEdicionEmpresa() {
+    const rol = appState.usuarioActual?.rol;
+    if (rol !== 'master' && rol !== 'administrador') {
+        return showToast('No tiene permisos para editar empresas', 'error');
+    }
+    const id = Number(gId('editar-empresa-id')?.value || 0) || null;
+    const rif = (gId('editar-empresa-rif')?.value || '').trim().toUpperCase();
+    const nombre = (gId('editar-empresa-nombre')?.value || '').trim();
+    if (!rif || !nombre) return showToast('Indique RIF y razón social', 'error');
+
+    const duplicada = (appState.empresas || []).find(e =>
+        Number(e.id) !== Number(id) && String(e.rif || '').toUpperCase() === rif
+    );
+    if (duplicada) return showToast('Ese RIF ya pertenece a otra empresa registrada', 'error');
+
+    const entrada = (appState.empresas || []).find(e => Number(e.id) === Number(id));
+
+    if (id && !esModoDemo()) {
+        mostrarCargando('Guardando cambios de la empresa...');
+        try {
+            await actualizarEmpresaEnDb(id, nombre, rif);
+        } catch (e) {
+            console.warn('Error actualizando empresa:', e);
+            ocultarCargando();
+            return showToast('No se pudo actualizar la empresa: ' + (e.message || e), 'error');
+        } finally {
+            ocultarCargando();
+        }
+    }
+
+    const rifActivo = String(appState.parametros.rif_empresa || '').toUpperCase();
+    const esActiva = !!(entrada && (
+        (appState.empresaActivaId && Number(entrada.id) === Number(appState.empresaActivaId)) ||
+        String(entrada.rif || '').toUpperCase() === rifActivo
+    ));
+
+    if (entrada) {
+        entrada.nombre = nombre;
+        entrada.rif = rif;
+    } else if (!appState.multiempresaActivo) {
+        appState.empresas = [...(appState.empresas || []), { id, nombre, rif, activo: true }];
+    }
+
+    // Si se editó la empresa activa, actualizar parámetros y configuración.
+    if (esActiva) {
+        appState.parametros.nombre_empresa = nombre;
+        appState.parametros.rif_empresa = rif;
+        appState.empresaActiva = rif;
+        appState.empresaActivaId = id || appState.empresaActivaId || null;
+        lsSet('nomina_parametros', JSON.stringify(appState.parametros));
+        lsSet('nomina_empresa_activa', rif);
+        if (!esModoDemo() && appState.esquemaOk) {
+            try {
+                await supabaseClient.from('parametros_config').update({
+                    nombre_empresa: nombre,
+                    rif_empresa: rif
+                }).eq('empresa_id', appState.empresaActivaId);
+            } catch (e) { console.warn('No se pudo sincronizar parametros_config:', e); }
+        }
+    }
+
+    lsSet('nomina_empresas', JSON.stringify(appState.empresas));
+    renderSelectorEmpresas();
+    aplicarParametrosEnVista();
+    closeModal('modal-editar-empresa');
+    showToast(`Empresa actualizada: ${nombre} (${rif})`);
 }
 
 function elegirEmpresa(rif) {
@@ -743,13 +893,19 @@ async function crearNuevaEmpresa() {
 
     // Grabar en public.empresas para que la empresa exista en TODOS los equipos, no sólo aquí.
     let nuevoId = null;
-    if (!esModoDemo() && appState.multiempresaActivo) {
+    if (!esModoDemo() && appState.esquemaOk) {
+        mostrarCargando('Registrando la nueva empresa...');
         try {
             nuevoId = await guardarEmpresaEnDb(nombre, rif);
             if (!nuevoId) throw new Error('La BD no devolvió el id de la empresa');
+            // Desde ahora el despliegue opera en modo multiempresa.
+            appState.multiempresaActivo = true;
         } catch (e) {
             console.warn('Error creando empresa en BD:', e);
-            return showToast('Sigue sin poder escribir en public.empresas (RLS). Ejecute el archivo SQL-FIX-EMPRESAS.sql en Supabase → SQL Editor y vuelva a intentar.', 'error');
+            ocultarCargando();
+            return showToast('No se pudo escribir en public.empresas. Ejecute SQL-REPARAR-TODO.sql en Supabase → SQL Editor y vuelva a intentar.', 'error');
+        } finally {
+            ocultarCargando();
         }
     }
 
@@ -821,7 +977,17 @@ async function cambiarEmpresaActiva(rif) {
     if (typeof actualizarClienteSupabase === 'function') actualizarClienteSupabase();
     aplicarParametrosEnVista();
     showToast(`Empresa activa: ${appState.parametros.nombre_empresa}`);
-    if (typeof fetchAllData === 'function' && !esEmpresaNueva) fetchAllData().catch(console.warn);
+    if (typeof fetchAllData === 'function' && !esEmpresaNueva) {
+        mostrarCargando(`Cargando datos de ${appState.parametros.nombre_empresa}...`);
+        try {
+            await fetchAllData();
+        } catch (e) {
+            console.warn('Error cargando datos de la empresa:', e);
+            showToast('No se pudieron cargar los datos de la empresa seleccionada', 'error');
+        } finally {
+            ocultarCargando();
+        }
+    }
 }
 
 function establecerEstadoConexion(estado, detalle) {

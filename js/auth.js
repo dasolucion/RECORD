@@ -114,8 +114,11 @@ async function iniciarSistemaAutenticado() {
         try { await cambiarEmpresaActiva(empresasValidas[0].rif); } catch (e) { console.warn('No se pudo activar la única empresa disponible:', e); }
     }
 
-    // Si hay varias empresas registradas en BD (multiempresa), pedir la empresa con la que trabajar.
-    if (appState.modoDatos === 'db' && empresasValidas.length > 1) {
+    // Si hay varias empresas registradas en BD (multiempresa), pedir la empresa con la que
+    // trabajar SÓLO cuando la activa no es válida. Si ya hay una empresa activa válida,
+    // el selector de la cabecera permite cambiar sin obligar a elegir en cada login.
+    if (typeof renderSelectorEmpresas === 'function') renderSelectorEmpresas();
+    if (appState.modoDatos === 'db' && empresasValidas.length > 1 && !activaValida) {
         if (typeof aplicarPermisosSegunRol === 'function') aplicarPermisosSegunRol();
         if (typeof abrirSelectorEmpresaDb === 'function') {
             abrirSelectorEmpresaDb();
