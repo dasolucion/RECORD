@@ -88,8 +88,34 @@ async function iniciarSistemaAutenticado() {
     gId('app-wrapper').classList.remove('hidden');
     gId('app-wrapper').classList.add('flex');
 
+    // En modo BD, esperar a que el esquema esté verificado y cargar las empresas reales
+    // de Supabase antes de decidir qué empresa usar. Nunca usar empresas de localStorage.
+    if (appState.modoDatos === 'db') {
+        if (!appState.esquemaOk && typeof verificarConexionInicial === 'function') {
+            try { await verificarConexionInicial(); } catch (e) { console.warn('No se pudo verificar la conexión al iniciar sesión:', e); }
+        }
+        if (typeof cargarEmpresasDesdeDb === 'function') {
+            try { await cargarEmpresasDesdeDb(); } catch (e) { console.warn('No se pudieron cargar las empresas:', e); }
+        }
+    }
+
+    const empresasValidas = (Array.isArray(appState.empresas) ? appState.empresas : [])
+        .filter(e => e && e.rif && (!appState.multiempresaActivo || e.id));
+
+    if (appState.modoDatos === 'db' && appState.multiempresaActivo && empresasValidas.length === 0) {
+        if (typeof showToast === 'function') showToast('No hay empresas visibles en la base de datos. Ejecute SQL-FIX-EMPRESAS.sql en Supabase.', 'error');
+    }
+
+    // Si sólo queda una empresa válida y la activa era una empresa local antigua,
+    // activar automáticamente la única empresa real.
+    const rifActivo = String((appState.parametros && appState.parametros.rif_empresa) || '').toUpperCase();
+    const activaValida = empresasValidas.some(e => String(e.rif).toUpperCase() === rifActivo);
+    if (appState.modoDatos === 'db' && empresasValidas.length === 1 && !activaValida) {
+        try { await cambiarEmpresaActiva(empresasValidas[0].rif); } catch (e) { console.warn('No se pudo activar la única empresa disponible:', e); }
+    }
+
     // Si hay varias empresas registradas en BD (multiempresa), pedir la empresa con la que trabajar.
-    if (appState.modoDatos === 'db' && Array.isArray(appState.empresas) && appState.empresas.length > 1) {
+    if (appState.modoDatos === 'db' && empresasValidas.length > 1) {
         if (typeof aplicarPermisosSegunRol === 'function') aplicarPermisosSegunRol();
         if (typeof abrirSelectorEmpresaDb === 'function') {
             abrirSelectorEmpresaDb();

@@ -24,7 +24,6 @@ let appState = {
     empresaActiva: null,   // RIF de la empresa activa
     empresaActivaId: null, // id de la empresa activa en public.empresas
     multiempresaActivo: false, // true cuando la BD expone la tabla empresas (una BD, varias empresas)
-    empresasPendientesDb: [],  // RIFs que existen sólo en localStorage y no se pudieron grabar en Supabase
     empresaRecienCreada: false, // true cuando se acaba de registrar una empresa nueva (estado en blanco, sin datos previos)
     estadoConexion: 'sinverificar', // sinverificar | comprobando | conectado | desconectado | cache | demo
     modoDatos: null,       // 'demo' | 'db' (null = auto según config)
@@ -326,12 +325,9 @@ function cargarCacheLocal() {
             supabase_url: prefillUrl,
             supabase_anon_key: prefillKey
         };
-        // Restaurar el registro de empresas y la empresa activa guardadas (multiempresa)
+        // En modo BD el registro de empresas SIEMPRE se carga desde Supabase.
+        // No se restauran empresas de localStorage para evitar "fantasmas" en el login.
         appState.empresas = [];
-        try {
-            const empsRaw = lsGet('nomina_empresas');
-            if (empsRaw) { const emps = JSON.parse(empsRaw); if (Array.isArray(emps)) appState.empresas = emps; }
-        } catch (e) {}
         appState.empresaActiva = lsGet('nomina_empresa_activa') || rifGuardado || null;
         // Si la empresa activa es una recién creada, mantener estado en blanco (sin cargar datos previos).
         appState.empresaRecienCreada = !!lsGet('nomina_empresa_recien_creada');
@@ -569,30 +565,46 @@ async function cargarEmpresasDesdeDb() {
         const res = await supabaseClient.from('empresas').select('id, nombre, rif, activo').order('id');
         if (res && res.error) return false;
         const filas = Array.isArray(res && res.data) ? res.data : [];
-        const mapa = {};
-        (appState.empresas || []).forEach(e => {
-            if (e && e.rif) mapa[String(e.rif).toUpperCase()] = e;
-        });
-        filas.forEach(f => {
-            const rif = String(f.rif || '').toUpperCase();
-            if (!rif) return;
-            const prev = mapa[rif] || {};
-            mapa[rif] = {
-                ...prev,
-                id: f.id,
-                rif: f.rif,
-                nombre: f.nombre || prev.nombre || f.rif,
-                activo: f.activo !== false,
-                parametros: prev.parametros || null
-            };
-        });
-        appState.empresas = Object.keys(mapa).map(k => mapa[k]);
+
+        // La BD es la única fuente de empresas. De localStorage sólo se recuperan los
+        // parámetros de empresas que también existan en Supabase (para no perder configuración).
+        const locales = {};
+        try {
+            const raw = lsGet('nomina_empresas');
+            if (raw) {
+                const arr = JSON.parse(raw);
+                if (Array.isArray(arr)) {
+                    arr.forEach(e => {
+                        if (e && e.rif) locales[String(e.rif).toUpperCase()] = e;
+                    });
+                }
+            }
+        } catch (e) {}
+
+        appState.empresas = filas
+            .filter(f => f && f.rif && f.activo !== false)
+            .map(f => {
+                const rif = String(f.rif);
+                const prev = locales[rif.toUpperCase()] || {};
+                return {
+                    id: f.id,
+                    rif,
+                    nombre: f.nombre || prev.nombre || rif,
+                    activo: true,
+                    parametros: prev.parametros || null
+                };
+            });
+
         appState.multiempresaActivo = true;
-        appState.empresasPendientesDb = appState.empresas.filter(e => e && e.rif && !e.id).map(e => e.rif);
         const rifActivo = String(appState.parametros.rif_empresa || '').toUpperCase();
         const activa = appState.empresas.find(e => String(e.rif).toUpperCase() === rifActivo);
         appState.empresaActivaId = activa ? activa.id : null;
+
+        // Limpiar el localStorage de empresas que ya no existen en la BD.
         lsSet('nomina_empresas', JSON.stringify(appState.empresas));
+        if (!appState.empresas.length) {
+            console.warn('La base de datos no devolvió empresas visibles. Revise RLS de public.empresas.');
+        }
         return true;
     } catch (e) {
         console.warn('No se pudo cargar el registro de empresas:', e);
@@ -612,43 +624,6 @@ async function guardarEmpresaEnDb(nombre, rif) {
     return busq && busq.data ? busq.data.id : null;
 }
 
-// Algunas empresas pueden existir sólo en el localStorage de un equipo (versiones anteriores
-// o altas fallidas por RLS). Al conectar, se intenta registrarlas en Supabase para que dejen
-// de ser "fantasmas" y pasen a tener empresa_id real.
-async function sincronizarEmpresasLocalesConDb() {
-    if (esModoDemo() || !appState.multiempresaActivo || !supabaseClient) {
-        return { creadas: [], pendientes: [] };
-    }
-    const faltan = (appState.empresas || []).filter(e => e && e.rif && !e.id);
-    if (!faltan.length) {
-        appState.empresasPendientesDb = [];
-        return { creadas: [], pendientes: [] };
-    }
-    const creadas = [];
-    const pendientes = [];
-    for (const e of faltan) {
-        try {
-            const id = await guardarEmpresaEnDb(e.nombre || e.rif, e.rif);
-            if (id) {
-                e.id = id;
-                e.activo = true;
-                creadas.push(e.rif);
-            } else {
-                pendientes.push(e.rif);
-            }
-        } catch (err) {
-            console.warn('No se pudo sincronizar empresa local:', e.rif, err);
-            pendientes.push(e.rif);
-        }
-    }
-    if (creadas.length) lsSet('nomina_empresas', JSON.stringify(appState.empresas));
-    appState.empresasPendientesDb = pendientes;
-    const rifActivo = String(appState.parametros.rif_empresa || '').toUpperCase();
-    const activa = (appState.empresas || []).find(e => String(e.rif).toUpperCase() === rifActivo);
-    appState.empresaActivaId = activa ? (activa.id || null) : null;
-    return { creadas, pendientes };
-}
-
 function guardarEmpresaActivaEnRegistro() {
     const rif = (appState.parametros.rif_empresa || '').trim();
     if (!rif) return;
@@ -657,7 +632,8 @@ function guardarEmpresaActivaEnRegistro() {
     const idx = appState.empresas.findIndex(e => String(e.rif).toUpperCase() === rif.toUpperCase());
     const entrada = { ...(idx >= 0 ? appState.empresas[idx] : {}), rif, nombre: appState.parametros.nombre_empresa, parametros: copia };
     if (idx >= 0) appState.empresas[idx] = entrada;
-    else appState.empresas.push(entrada);
+    // En multiempresa no se agregan empresas locales: la lista válida viene de Supabase.
+    else if (!appState.multiempresaActivo) appState.empresas.push(entrada);
     appState.empresaActiva = rif;
     appState.empresaActivaId = entrada.id || null;
     lsSet('nomina_empresas', JSON.stringify(appState.empresas));
@@ -674,18 +650,13 @@ function renderSelectorEmpresas() {
         return;
     }
     sel.disabled = false;
-    const lista = Array.isArray(appState.empresas) ? appState.empresas.slice() : [];
+    // Sólo empresas reales de Supabase. Las empresas locales antiguas ya no se muestran.
+    const lista = (Array.isArray(appState.empresas) ? appState.empresas : [])
+        .filter(e => e && e.rif && (!appState.multiempresaActivo || e.id));
     const rifActual = String(appState.parametros.rif_empresa || '').trim().toUpperCase();
-    if (rifActual && !lista.some(e => String(e.rif).toUpperCase() === rifActual)) {
-        lista.unshift({ rif: appState.parametros.rif_empresa, nombre: appState.parametros.nombre_empresa });
-    }
-    const pendientes = appState.empresasPendientesDb || [];
     sel.innerHTML = lista.length
-        ? lista.map(e => {
-            const aviso = pendientes.some(r => String(r).toUpperCase() === String(e.rif).toUpperCase()) ? ' ⚠ sólo local' : '';
-            return `<option value="${e.rif}" ${String(e.rif).toUpperCase() === rifActual ? 'selected' : ''}>${e.nombre || e.rif} — ${e.rif}${aviso}</option>`;
-        }).join('')
-        : `<option value="">(Sin empresas registradas)</option>`;
+        ? lista.map(e => `<option value="${e.rif}" ${String(e.rif).toUpperCase() === rifActual ? 'selected' : ''}>${e.nombre || e.rif} — ${e.rif}</option>`).join('')
+        : `<option value="">(Sin empresas registradas en la base de datos)</option>`;
 }
 
 function abrirModalNuevaEmpresa() {
@@ -698,16 +669,17 @@ function abrirSelectorEmpresaDb() {
     const cont = gId('selector-empresas-lista');
     const modal = gId('modal-selector-empresa');
     if (!cont || !modal) return;
-    const lista = (Array.isArray(appState.empresas) ? appState.empresas : []).filter(e => e && e.rif).slice();
-    if (!lista.length) { closeModal('modal-selector-empresa'); return; }
-    const pendientes = appState.empresasPendientesDb || [];
-    cont.innerHTML = lista.map(e => {
-        const aviso = pendientes.some(r => String(r).toUpperCase() === String(e.rif).toUpperCase());
-        return `<button onclick="elegirEmpresa('${String(e.rif).replace(/'/g, "''")}')" class="w-full text-left bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 transition">
+    const lista = (Array.isArray(appState.empresas) ? appState.empresas : [])
+        .filter(e => e && e.rif && (!appState.multiempresaActivo || e.id));
+    if (!lista.length) {
+        closeModal('modal-selector-empresa');
+        if (typeof showToast === 'function') showToast('No hay empresas visibles en la base de datos. Ejecute SQL-FIX-EMPRESAS.sql en Supabase.', 'error');
+        return;
+    }
+    cont.innerHTML = lista.map(e => `<button onclick="elegirEmpresa('${String(e.rif).replace(/'/g, "''")}')" class="w-full text-left bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 transition">
         <span class="text-xs font-bold text-slate-100">${esc(e.nombre || e.rif)}</span>
-        <span class="text-[11px] ${aviso ? 'text-amber-400' : 'text-slate-400'} font-mono">${aviso ? '⚠ sólo local · ' : ''}${esc(e.rif)}</span>
-    </button>`;
-    }).join('');
+        <span class="text-[11px] text-slate-400 font-mono">${esc(e.rif)}</span>
+    </button>`).join('');
     openModal('modal-selector-empresa');
 }
 
@@ -785,28 +757,15 @@ async function cambiarEmpresaActiva(rif) {
     const entrada = (appState.empresas || []).find(e => String(e.rif).toUpperCase() === String(rif).toUpperCase());
     if (!entrada) return showToast('Empresa no encontrada en el registro', 'error');
 
-    // Si la empresa existe sólo en este equipo, intentar grabarla ahora en Supabase.
-    let pendienteDb = false;
-    if (!entrada.id && !esModoDemo() && supabaseClient && appState.multiempresaActivo) {
-        try {
-            const idDb = await guardarEmpresaEnDb(entrada.nombre || entrada.rif, entrada.rif);
-            if (idDb) {
-                entrada.id = idDb;
-                entrada.activo = true;
-                lsSet('nomina_empresas', JSON.stringify(appState.empresas));
-                const ix = (appState.empresasPendientesDb || []).indexOf(entrada.rif);
-                if (ix !== -1) appState.empresasPendientesDb.splice(ix, 1);
-            } else {
-                pendienteDb = true;
-            }
-        } catch (e) {
-            console.warn('No se pudo grabar la empresa al activarla:', e);
-            pendienteDb = true;
-        }
+    // En multiempresa sólo se pueden activar empresas registradas en Supabase.
+    if (appState.multiempresaActivo && !entrada.id) {
+        appState.empresas = (appState.empresas || []).filter(e => String(e.rif).toUpperCase() !== String(rif).toUpperCase());
+        lsSet('nomina_empresas', JSON.stringify(appState.empresas));
+        return showToast('Esa empresa no está registrada en la base de datos y se quitó del selector local.', 'error');
     }
 
     // Si se activa una empresa recién creada, mantener estado en blanco; si es una empresa registrada, cargar sus datos.
-    const esEmpresaNueva = pendienteDb || (lsGet('nomina_empresa_recien_creada') || '') === String(rif || '').toUpperCase();
+    const esEmpresaNueva = (lsGet('nomina_empresa_recien_creada') || '') === String(rif || '').toUpperCase();
     appState.empresaRecienCreada = esEmpresaNueva;
     if (!esEmpresaNueva) lsRemove('nomina_empresa_recien_creada');
     // Siempre limpiar memoria y cachés para no mezclar datos de la empresa anterior.
@@ -824,11 +783,6 @@ async function cambiarEmpresaActiva(rif) {
     lsSet('nomina_empresa_activa', entrada.rif);
     if (typeof actualizarClienteSupabase === 'function') actualizarClienteSupabase();
     aplicarParametrosEnVista();
-
-    if (pendienteDb) {
-        showToast(`Empresa ${entrada.nombre} activada sólo en este equipo. Ejecute SQL-FIX-EMPRESAS.sql para grabarla en Supabase.`, 'error');
-        return;
-    }
     showToast(`Empresa activa: ${appState.parametros.nombre_empresa}`);
     if (typeof fetchAllData === 'function' && !esEmpresaNueva) fetchAllData().catch(console.warn);
 }

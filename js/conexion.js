@@ -34,14 +34,23 @@ async function prepararMultiempresaParaCarga() {
     }
     if (appState.multiempresaActivo && typeof cargarEmpresasDesdeDb === 'function') {
         await cargarEmpresasDesdeDb();
-        if (typeof sincronizarEmpresasLocalesConDb === 'function') {
-            await sincronizarEmpresasLocalesConDb();
-        }
     }
 }
 
 async function fetchAllData() {
     await prepararMultiempresaParaCarga();
+
+    // En multiempresa no se cargan datos si la empresa activa no existe en Supabase.
+    // Así se evita mostrar datos de Recordplast bajo una empresa local "fantasma".
+    if (appState.multiempresaActivo) {
+        const rifActivo = String((appState.parametros && appState.parametros.rif_empresa) || '').toUpperCase();
+        const activaValida = (appState.empresas || []).some(e => e && e.id && String(e.rif).toUpperCase() === rifActivo);
+        if (!activaValida) {
+            limpiarEstadoNegocio();
+            if (typeof showToast === 'function') showToast('Seleccione una empresa registrada en la base de datos.', 'error');
+            return;
+        }
+    }
 
     // --- Departamentos ---
     const deptos = await safeQuery(
