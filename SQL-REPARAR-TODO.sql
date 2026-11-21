@@ -105,6 +105,7 @@ do $$
 declare
   v_id bigint;
   v_count int;
+  v_datos int := 0;
   v_tabla text;
   tablas text[] := array[
     'departamentos','cargos','empleados','nominas','historico_salarios','vacaciones',
@@ -124,7 +125,8 @@ begin
   end if;
 
   if v_count > 1 then
-    raise exception 'Hay % empresas 407 candidatas. Revise el SELECT inicial y borre manualmente por id.', v_count;
+    raise notice 'Hay % empresas 407 candidatas. No se borra ninguna automáticamente; revise el SELECT inicial y borre por id.', v_count;
+    return;
   end if;
 
   select id into v_id
@@ -141,14 +143,23 @@ begin
     execute format('select count(*) from public.%I where empresa_id = $1', v_tabla)
       into v_count using v_id;
     if v_count > 0 then
-      raise exception 'La empresa % tiene % fila(s) en public.%. No se borra automáticamente.', v_id, v_count, v_tabla;
+      v_datos := v_datos + v_count;
+      raise notice 'La empresa % tiene % fila(s) en public.%.', v_id, v_count, v_tabla;
     end if;
   end loop;
 
-  delete from public.parametros_config where empresa_id = v_id;
-  delete from public.empresas where id = v_id;
+  if v_datos > 0 then
+    raise notice 'La empresa % tiene datos asociados. NO se borra automáticamente.', v_id;
+    return;
+  end if;
 
-  raise notice 'Empresa incorrecta % eliminada correctamente.', v_id;
+  begin
+    delete from public.parametros_config where empresa_id = v_id;
+    delete from public.empresas where id = v_id;
+    raise notice 'Empresa incorrecta % eliminada correctamente.', v_id;
+  exception when others then
+    raise notice 'No se pudo borrar la empresa %: %', v_id, SQLERRM;
+  end;
 end $$;
 
 -- ------------------------------------------------------------
