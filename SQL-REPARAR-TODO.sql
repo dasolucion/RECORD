@@ -1,25 +1,29 @@
 -- ============================================================
--- RECORD — REPARAR MULTIEMPRESA Y BORRAR LA EMPRESA INCORRECTA
+-- RECORD — CONSOLIDAR EMPRESA EN ID = 1
 -- Ejecutar COMPLETO en Supabase → SQL Editor → proyecto RECORD
--- (kvlkmpvnyvudlgbqoyer). Es idempotente: se puede repetir.
+-- (kvlkmpvnyvudlgbqoyer). Es idempotente.
 -- ============================================================
--- La empresa CORRECTA es Recordplast, C.A. — RIF J-40771060-5.
--- Este script conserva esa empresa y borra la otra empresa creada
--- por error, siempre que no tenga datos de negocio asociados.
+-- Situación actual:
+--   id = 1  → "Recordplast" con RIF viejo J-50685235-7  (datos: 5 empleados, 5 nóminas)
+--   id = 7  → "Recordplast, C.A." con RIF correcto J-40771060-5 (sin datos)
 --
--- Hace todo en un solo paso:
---   1) Permite que la clave pública (anon) lea y escriba public.empresas.
---   2) Asegura las columnas empresa_id.
---   3) Crea/actualiza Recordplast desde parametros_config (id = 1).
---   4) Vincula la configuración y rellena empresa_id en los datos existentes.
---   5) Borra la empresa distinta de Recordplast (si es una y no tiene datos).
---   6) Recarga la caché de PostgREST y muestra el resultado.
+-- Este script aplica la OPCIÓN 1:
+--   1) Deja la empresa canónica en id = 1 (donde ya están los datos).
+--   2) Le corrige nombre y RIF a Recordplast, C.A. — J-40771060-5.
+--   3) Apunta parametros_config a empresa_id = 1.
+--   4) Borra la fila duplicada id = 7 (sólo si no tiene datos propios).
+--   5) Rellena empresa_id nulo en los datos existentes.
+--   6) Recarga la caché de PostgREST y muestra la verificación.
 
 -- ------------------------------------------------------------
--- 0) Diagnóstico previo: revise esta lista
+-- 0) Diagnóstico previo
 -- ------------------------------------------------------------
 select id, nombre, rif, activo, created_at
 from public.empresas
+order by id;
+
+select id, nombre_empresa, rif_empresa, empresa_id
+from public.parametros_config
 order by id;
 
 -- ------------------------------------------------------------
@@ -53,63 +57,14 @@ begin
 end $$;
 
 -- ------------------------------------------------------------
--- 3) Empresa correcta desde la configuración real (sin RIF fijo)
--- ------------------------------------------------------------
-insert into public.empresas (nombre, rif, activo)
-select coalesce(nullif(pc.nombre_empresa, ''), 'RECORDPLAST'),
-       coalesce(nullif(pc.rif_empresa, ''), 'J-40771060-5'),
-       true
-from public.parametros_config pc
-where pc.id = 1
-  and coalesce(pc.rif_empresa, '') <> ''
-  and not exists (
-    select 1 from public.empresas e
-    where upper(e.rif) = upper(pc.rif_empresa)
-  );
-
--- ------------------------------------------------------------
--- 4) Vincular la configuración inicial y rellenar empresa_id
--- ------------------------------------------------------------
-update public.parametros_config
-set empresa_id = (
-  select id from public.empresas
-  where upper(rif) = upper(parametros_config.rif_empresa)
-  limit 1
-)
-where id = 1;
-
-do $$
-declare t text; id_inicial bigint;
-begin
-  select id into id_inicial
-  from public.empresas
-  where upper(rif) = (select upper(rif_empresa) from public.parametros_config where id = 1)
-  limit 1;
-
-  if id_inicial is null then return; end if;
-
-  foreach t in array array[
-    'departamentos','cargos','empleados','nominas','historico_salarios','vacaciones',
-    'utilidades','prestaciones','antiguedad','anticipos_prestaciones','prestamos_anticipos',
-    'prestamos_abonos','asistencia_registros','justificativos_faltas','expediente_documentos',
-    'prenomina_borrador','firmas_recibos','tokens_portal_empleado','solicitudes_ari'
-  ] loop
-    if to_regclass(format('public.%I', t)) is not null then
-      execute format('update public.%I set empresa_id = $1 where empresa_id is null', t)
-        using id_inicial;
-    end if;
-  end loop;
-end $$;
-
--- ------------------------------------------------------------
--- 5) Borrar la empresa INCORRECTA (distinta de Recordplast J-40771060-5)
---    Sólo borra si es exactamente una y no tiene datos de negocio.
+-- 3) Consolidar en id = 1
 -- ------------------------------------------------------------
 do $$
 declare
-  v_id bigint;
-  v_count int;
-  v_datos int := 0;
+  v_rif_correcto text;
+  v_nombre_correcto text;
+  v_id_correcto bigint;
+  v_datos int;
   v_tabla text;
   tablas text[] := array[
     'departamentos','cargos','empleados','nominas','historico_salarios','vacaciones',
@@ -118,61 +73,114 @@ declare
     'prenomina_borrador','firmas_recibos','tokens_portal_empleado','solicitudes_ari'
   ];
 begin
-  -- Candidatas: todas las empresas que NO son Recordplast.
-  select count(*) into v_count
-  from public.empresas
-  where upper(rif) <> 'J-40771060-5';
+  -- El nombre y RIF correctos salen de la configuración real (parametros_config id = 1).
+  select nullif(rif_empresa, ''), nullif(nombre_empresa, '')
+    into v_rif_correcto, v_nombre_correcto
+  from public.parametros_config
+  where id = 1;
 
-  if v_count = 0 then
-    raise notice 'Solo existe Recordplast (J-40771060-5). Nada que borrar.';
+  if v_rif_correcto is null then
+    raise notice 'parametros_config id = 1 no tiene RIF. No se consolida automáticamente.';
     return;
   end if;
 
-  if v_count > 1 then
-    raise notice 'Hay % empresas distintas de Recordplast. No se borra ninguna automáticamente; revise el SELECT inicial y borre por id.', v_count;
-    return;
-  end if;
-
-  select id into v_id
+  -- Empresa que hoy tiene ese RIF correcto (normalmente id = 7).
+  select id into v_id_correcto
   from public.empresas
-  where upper(rif) <> 'J-40771060-5'
+  where upper(rif) = upper(v_rif_correcto)
   order by id
   limit 1;
 
+  -- Si la empresa correcta no es id = 1, verificar que no tenga datos propios.
+  -- Los datos reales deben estar bajo empresa_id = 1.
+  if v_id_correcto is not null and v_id_correcto <> 1 then
+    foreach v_tabla in array tablas loop
+      if to_regclass(format('public.%I', v_tabla)) is null then
+        continue;
+      end if;
+      execute format('select count(*) from public.%I where empresa_id = $1', v_tabla)
+        into v_datos using v_id_correcto;
+      if v_datos > 0 then
+        raise notice 'La empresa % (RIF %) tiene % fila(s) en public.%. No se consolida automáticamente.', v_id_correcto, v_rif_correcto, v_datos, v_tabla;
+        return;
+      end if;
+    end loop;
+  end if;
+
+  -- 1) Mover cualquier configuración que apunte a la empresa duplicada hacia id = 1.
+  if v_id_correcto is not null and v_id_correcto <> 1 then
+    update public.parametros_config
+    set empresa_id = 1
+    where empresa_id = v_id_correcto;
+  end if;
+
+  -- 2) Borrar la empresa duplicada (id = 7) si no es id = 1.
+  if v_id_correcto is not null and v_id_correcto <> 1 then
+    begin
+      delete from public.empresas where id = v_id_correcto;
+      raise notice 'Empresa duplicada % eliminada. Los datos quedan en id = 1.', v_id_correcto;
+    exception when others then
+      raise notice 'No se pudo borrar la empresa %: %', v_id_correcto, SQLERRM;
+      return;
+    end;
+  end if;
+
+  -- 3) Corregir (o crear) la empresa id = 1 con el nombre/RIF reales.
+  if exists (select 1 from public.empresas where id = 1) then
+    update public.empresas
+    set nombre = coalesce(v_nombre_correcto, 'Recordplast, C.A.'),
+        rif = v_rif_correcto,
+        activo = true
+    where id = 1;
+  else
+    insert into public.empresas (id, nombre, rif, activo)
+    values (1, coalesce(v_nombre_correcto, 'Recordplast, C.A.'), v_rif_correcto, true);
+  end if;
+
+  -- 4) Configuración id = 1 apuntando a la empresa 1.
+  update public.parametros_config
+  set empresa_id = 1,
+      nombre_empresa = coalesce(v_nombre_correcto, 'Recordplast, C.A.'),
+      rif_empresa = v_rif_correcto
+  where id = 1;
+
+  -- 5) Rellenar empresa_id nulo en los datos existentes.
   foreach v_tabla in array tablas loop
     if to_regclass(format('public.%I', v_tabla)) is null then
       continue;
     end if;
-    execute format('select count(*) from public.%I where empresa_id = $1', v_tabla)
-      into v_count using v_id;
-    if v_count > 0 then
-      v_datos := v_datos + v_count;
-      raise notice 'La empresa % tiene % fila(s) en public.%.', v_id, v_count, v_tabla;
-    end if;
+    execute format('update public.%I set empresa_id = 1 where empresa_id is null', v_tabla);
   end loop;
 
-  if v_datos > 0 then
-    raise notice 'La empresa % tiene datos asociados. NO se borra automáticamente.', v_id;
-    return;
-  end if;
-
-  begin
-    delete from public.parametros_config where empresa_id = v_id;
-    delete from public.empresas where id = v_id;
-    raise notice 'Empresa incorrecta % eliminada correctamente. Recordplast se conserva.', v_id;
-  exception when others then
-    raise notice 'No se pudo borrar la empresa %: %', v_id, SQLERRM;
-  end;
+  raise notice 'Consolidado en id = 1: % (%).', v_nombre_correcto, v_rif_correcto;
 end $$;
 
 -- ------------------------------------------------------------
--- 6) Recargar la caché de esquema de la API
+-- 4) Recargar la caché de esquema de la API
 -- ------------------------------------------------------------
 notify pgrst, 'reload schema';
 
 -- ------------------------------------------------------------
--- 7) Verificación final: debe quedar sólo Recordplast (J-40771060-5)
+-- 5) Verificación final
 -- ------------------------------------------------------------
 select id, nombre, rif, activo, created_at
 from public.empresas
 order by id;
+
+select id, nombre_empresa, rif_empresa, empresa_id
+from public.parametros_config
+order by id;
+
+-- Conteos por empresa: los datos deben seguir en empresa_id = 1
+select 'empleados' as tabla, empresa_id, count(*) as filas
+from public.empleados group by empresa_id
+union all
+select 'nominas', empresa_id, count(*)
+from public.nominas group by empresa_id
+union all
+select 'departamentos', empresa_id, count(*)
+from public.departamentos group by empresa_id
+union all
+select 'cargos', empresa_id, count(*)
+from public.cargos group by empresa_id
+order by tabla, empresa_id;
