@@ -464,7 +464,7 @@ async function guardarParametrosGenerales() {
     const empresaIdActiva = obtenerEmpresaIdActiva() || (appState.empresaActivaId ? Number(appState.empresaActivaId) : null);
     const rifNuevo = String(appState.parametros.rif_empresa || '').trim().toUpperCase();
     const nombreNuevo = appState.parametros.nombre_empresa || '';
-    if (!esModoDemo() && appState.esquemaOk && empresaIdActiva &&
+    if (appState.usuarioActual?.rol === 'master' && !esModoDemo() && appState.esquemaOk && empresaIdActiva &&
         (rifNuevo !== rifAnterior || nombreNuevo !== nombreAnterior)) {
         const duplicada = (appState.empresas || []).find(e =>
             Number(e.id) !== Number(empresaIdActiva) && String(e.rif || '').toUpperCase() === rifNuevo
@@ -737,6 +737,9 @@ function renderSelectorEmpresas() {
 }
 
 function abrirModalNuevaEmpresa() {
+    if (appState.usuarioActual?.rol !== 'master') {
+        return showToast('Sólo el usuario Master puede crear empresas', 'error');
+    }
     if (gId('nueva-empresa-rif')) gId('nueva-empresa-rif').value = '';
     if (gId('nueva-empresa-nombre')) gId('nueva-empresa-nombre').value = '';
     openModal('modal-nueva-empresa');
@@ -753,28 +756,26 @@ function abrirSelectorEmpresaDb() {
         if (typeof showToast === 'function') showToast('No hay empresas visibles en la base de datos. Ejecute SQL-FIX-EMPRESAS.sql en Supabase.', 'error');
         return;
     }
+    // Este modal es SOLO de selección: crear/editar empresas se hace en Parámetros (master).
     const rifActual = String(appState.parametros.rif_empresa || '').toUpperCase();
     cont.innerHTML = lista.map(e => {
         const rifAttr = String(e.rif).replace(/'/g, "''");
         const esActiva = String(e.rif).toUpperCase() === rifActual;
-        const botonEditar = e.id
-            ? `<button onclick="abrirModalEditarEmpresa(${Number(e.id)})" title="Editar nombre o RIF" class="shrink-0 bg-slate-800 hover:bg-indigo-600 border border-slate-700 text-slate-300 hover:text-white rounded-lg p-2.5 transition"><i class="fa-solid fa-pen text-xs"></i></button>`
-            : '';
         const badgeActiva = esActiva
             ? `<span class="text-[9px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded px-1.5 py-0.5 mr-2">ACTIVA</span>`
             : '';
-        return `<div class="flex items-center gap-2">
-            <button onclick="elegirEmpresa('${rifAttr}')" class="flex-1 text-left bg-slate-950 hover:bg-slate-800 border ${esActiva ? 'border-emerald-500/50' : 'border-slate-800'} rounded-lg p-3 flex items-center justify-between gap-2 transition">
-                <span class="text-xs font-bold text-slate-100">${badgeActiva}${esc(e.nombre || e.rif)}</span>
-                <span class="text-[11px] text-slate-400 font-mono">${esc(e.rif)}</span>
-            </button>
-            ${botonEditar}
-        </div>`;
+        return `<button onclick="elegirEmpresa('${rifAttr}')" class="w-full text-left bg-slate-950 hover:bg-slate-800 border ${esActiva ? 'border-emerald-500/50' : 'border-slate-800'} rounded-lg p-3 flex items-center justify-between gap-2 transition">
+            <span class="text-xs font-bold text-slate-100">${badgeActiva}${esc(e.nombre || e.rif)}</span>
+            <span class="text-[11px] text-slate-400 font-mono">${esc(e.rif)}</span>
+        </button>`;
     }).join('');
     openModal('modal-selector-empresa');
 }
 
 function abrirModalEditarEmpresa(id) {
+    if (appState.usuarioActual?.rol !== 'master') {
+        return showToast('Sólo el usuario Master puede editar empresas', 'error');
+    }
     const empresa = (appState.empresas || []).find(e => Number(e.id) === Number(id));
     if (!empresa) return showToast('Empresa no encontrada en el registro', 'error');
     if (gId('editar-empresa-id')) gId('editar-empresa-id').value = empresa.id;
@@ -785,6 +786,9 @@ function abrirModalEditarEmpresa(id) {
 }
 
 function abrirModalEditarEmpresaActiva() {
+    if (appState.usuarioActual?.rol !== 'master') {
+        return showToast('Sólo el usuario Master puede editar empresas', 'error');
+    }
     const id = obtenerEmpresaIdActiva() || appState.empresaActivaId || null;
     const rifActivo = String(appState.parametros.rif_empresa || '').toUpperCase();
     const empresa = (appState.empresas || []).find(e =>
@@ -808,9 +812,8 @@ async function actualizarEmpresaEnDb(id, nombre, rif) {
 }
 
 async function guardarEdicionEmpresa() {
-    const rol = appState.usuarioActual?.rol;
-    if (rol !== 'master' && rol !== 'administrador') {
-        return showToast('No tiene permisos para editar empresas', 'error');
+    if (appState.usuarioActual?.rol !== 'master') {
+        return showToast('Sólo el usuario Master puede editar empresas', 'error');
     }
     const id = Number(gId('editar-empresa-id')?.value || 0) || null;
     const rif = (gId('editar-empresa-rif')?.value || '').trim().toUpperCase();
@@ -881,9 +884,8 @@ function elegirEmpresa(rif) {
 }
 
 async function crearNuevaEmpresa() {
-    const rol = appState.usuarioActual?.rol;
-    if (rol !== 'master' && rol !== 'administrador') {
-        return showToast('No tiene permisos para crear empresas', 'error');
+    if (appState.usuarioActual?.rol !== 'master') {
+        return showToast('Sólo el usuario Master puede crear empresas', 'error');
     }
     const rif = (gId('nueva-empresa-rif')?.value || '').trim().toUpperCase();
     const nombre = (gId('nueva-empresa-nombre')?.value || '').trim();

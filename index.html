@@ -871,11 +871,11 @@
                             <select id="param-empresa-selector" onchange="cambiarEmpresaActiva(this.value)" class="bg-slate-900 border border-indigo-500/40 rounded-lg p-2 text-xs text-indigo-300 font-bold outline-none focus:border-indigo-500 w-full sm:w-80"></select>
                         </div>
                         <div class="flex items-center gap-2 w-full sm:w-auto">
-                            <button onclick="abrirModalEditarEmpresaActiva()" class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs px-3.5 py-2 rounded-lg font-bold flex items-center space-x-1.5 shadow transition whitespace-nowrap">
+                            <button id="btn-editar-empresa" onclick="abrirModalEditarEmpresaActiva()" class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs px-3.5 py-2 rounded-lg font-bold flex items-center space-x-1.5 shadow transition whitespace-nowrap">
                                 <i class="fa-solid fa-pen"></i>
                                 <span>Editar Empresa</span>
                             </button>
-                            <button onclick="abrirModalNuevaEmpresa()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3.5 py-2 rounded-lg font-bold flex items-center space-x-1.5 shadow transition whitespace-nowrap">
+                            <button id="btn-nueva-empresa" onclick="abrirModalNuevaEmpresa()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3.5 py-2 rounded-lg font-bold flex items-center space-x-1.5 shadow transition whitespace-nowrap">
                                 <i class="fa-solid fa-building-circle-plus"></i>
                                 <span>+ Nueva Empresa</span>
                             </button>

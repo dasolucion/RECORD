@@ -220,6 +220,19 @@ function aplicarPermisosSegunRol() {
     const panelFlags = gId('panel-superadmin-features');
     if (panelFlags) panelFlags.style.display = isMaster ? '' : 'none';
 
+    // Crear/editar empresas es una operación exclusiva del Master y se hace desde Parámetros.
+    ['btn-editar-empresa', 'btn-nueva-empresa'].forEach(id => {
+        const el = gId(id);
+        if (el) el.style.display = isMaster ? '' : 'none';
+    });
+    ['param-empresa-nombre', 'param-empresa-rif'].forEach(id => {
+        const el = gId(id);
+        if (!el) return;
+        el.readOnly = !isMaster;
+        el.classList.toggle('opacity-60', !isMaster);
+        el.title = isMaster ? '' : 'Sólo el usuario Master puede modificar los datos de la empresa';
+    });
+
     if (typeof aplicarPermisosUI === 'function') aplicarPermisosUI();
     if (primerModuloVisible && typeof switchTab === 'function') switchTab(primerModuloVisible);
     else if (!primerModuloVisible) showToast('Su usuario no tiene acceso a ningún módulo. Contacte al administrador.', 'error');
