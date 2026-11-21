@@ -10,10 +10,13 @@ function verificarSesionInicial() {
         try {
             const u = JSON.parse(ses);
             appState.usuarioActual = u;
+            // Sesión restaurada: no se fuerza el modal de empresa en cada recarga.
+            appState.sesionRestaurada = true;
             iniciarSistemaAutenticado();
             return;
         } catch (e) {}
     }
+    appState.sesionRestaurada = false;
     gId('login-screen').classList.remove('hidden');
     gId('app-wrapper').classList.add('hidden');
     gId('app-wrapper').classList.remove('flex');
@@ -57,6 +60,8 @@ async function ejecutarLogin(e) {
 
     errDiv.classList.add('hidden');
     appState.usuarioActual = coincidencia;
+    // Login explícito: sí se debe preguntar la empresa cuando hay más de una.
+    appState.sesionRestaurada = false;
 
     const sesionSegura = {
         id: coincidencia.id,
@@ -114,11 +119,11 @@ async function iniciarSistemaAutenticado() {
         try { await cambiarEmpresaActiva(empresasValidas[0].rif); } catch (e) { console.warn('No se pudo activar la única empresa disponible:', e); }
     }
 
-    // Si hay varias empresas registradas en BD (multiempresa), pedir la empresa con la que
-    // trabajar SÓLO cuando la activa no es válida. Si ya hay una empresa activa válida,
-    // el selector de la cabecera permite cambiar sin obligar a elegir en cada login.
+    // Si hay varias empresas registradas en BD, el login explícito SIEMPRE pregunta
+    // con cuál trabajar, aunque ya exista una activa válida. En recargas con sesión
+    // restaurada se respeta la empresa guardada (el selector de cabecera sigue disponible).
     if (typeof renderSelectorEmpresas === 'function') renderSelectorEmpresas();
-    if (appState.modoDatos === 'db' && empresasValidas.length > 1 && !activaValida) {
+    if (appState.modoDatos === 'db' && empresasValidas.length > 1 && !appState.sesionRestaurada) {
         if (typeof aplicarPermisosSegunRol === 'function') aplicarPermisosSegunRol();
         if (typeof abrirSelectorEmpresaDb === 'function') {
             abrirSelectorEmpresaDb();

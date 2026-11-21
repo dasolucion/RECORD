@@ -753,14 +753,19 @@ function abrirSelectorEmpresaDb() {
         if (typeof showToast === 'function') showToast('No hay empresas visibles en la base de datos. Ejecute SQL-FIX-EMPRESAS.sql en Supabase.', 'error');
         return;
     }
+    const rifActual = String(appState.parametros.rif_empresa || '').toUpperCase();
     cont.innerHTML = lista.map(e => {
         const rifAttr = String(e.rif).replace(/'/g, "''");
+        const esActiva = String(e.rif).toUpperCase() === rifActual;
         const botonEditar = e.id
             ? `<button onclick="abrirModalEditarEmpresa(${Number(e.id)})" title="Editar nombre o RIF" class="shrink-0 bg-slate-800 hover:bg-indigo-600 border border-slate-700 text-slate-300 hover:text-white rounded-lg p-2.5 transition"><i class="fa-solid fa-pen text-xs"></i></button>`
             : '';
+        const badgeActiva = esActiva
+            ? `<span class="text-[9px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded px-1.5 py-0.5 mr-2">ACTIVA</span>`
+            : '';
         return `<div class="flex items-center gap-2">
-            <button onclick="elegirEmpresa('${rifAttr}')" class="flex-1 text-left bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 transition">
-                <span class="text-xs font-bold text-slate-100">${esc(e.nombre || e.rif)}</span>
+            <button onclick="elegirEmpresa('${rifAttr}')" class="flex-1 text-left bg-slate-950 hover:bg-slate-800 border ${esActiva ? 'border-emerald-500/50' : 'border-slate-800'} rounded-lg p-3 flex items-center justify-between gap-2 transition">
+                <span class="text-xs font-bold text-slate-100">${badgeActiva}${esc(e.nombre || e.rif)}</span>
                 <span class="text-[11px] text-slate-400 font-mono">${esc(e.rif)}</span>
             </button>
             ${botonEditar}
