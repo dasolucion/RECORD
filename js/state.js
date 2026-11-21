@@ -581,6 +581,46 @@ async function cargarEmpresasDesdeDb() {
             }
         } catch (e) {}
 
+        // Si la tabla empresas está vacía o RLS la oculta, el sistema no debe quedar inutilizable.
+        // Se usa la empresa real de parametros_config (id = 1) como empresa única.
+        if (!filas.length) {
+            let p = null;
+            try {
+                const pr = await supabaseClient.from('parametros_config').select('*').eq('id', 1).maybeSingle();
+                p = pr && pr.data ? pr.data : null;
+            } catch (e) {
+                console.warn('No se pudo leer parametros_config para el modo empresa única:', e);
+            }
+            if (p && p.rif_empresa) {
+                appState.empresas = [{
+                    id: p.empresa_id || null,
+                    rif: p.rif_empresa,
+                    nombre: p.nombre_empresa || p.rif_empresa,
+                    activo: true,
+                    parametros: p
+                }];
+                appState.parametros = {
+                    ...appState.parametros,
+                    ...p,
+                    rif_empresa: p.rif_empresa,
+                    nombre_empresa: p.nombre_empresa || p.rif_empresa
+                };
+                appState.empresaActivaId = p.empresa_id || null;
+                appState.empresaActiva = p.rif_empresa;
+                // Sin empresa_id no hay filtro multiempresa: se comporta como despliegue de una sola empresa.
+                if (!p.empresa_id) appState.multiempresaActivo = false;
+                lsSet('nomina_empresas', JSON.stringify(appState.empresas));
+                lsSet('nomina_parametros', JSON.stringify(appState.parametros));
+                lsSet('nomina_empresa_activa', p.rif_empresa);
+                console.warn('public.empresas no es visible con la clave pública. Usando empresa única de parametros_config. Ejecute SQL-REPARAR-TODO.sql para habilitar multiempresa.');
+                return true;
+            }
+            appState.empresas = [];
+            lsSet('nomina_empresas', '[]');
+            console.warn('La base de datos no devolvió empresas visibles. Revise RLS de public.empresas.');
+            return true;
+        }
+
         appState.empresas = filas
             .filter(f => f && f.rif && f.activo !== false)
             .map(f => {
@@ -602,9 +642,6 @@ async function cargarEmpresasDesdeDb() {
 
         // Limpiar el localStorage de empresas que ya no existen en la BD.
         lsSet('nomina_empresas', JSON.stringify(appState.empresas));
-        if (!appState.empresas.length) {
-            console.warn('La base de datos no devolvió empresas visibles. Revise RLS de public.empresas.');
-        }
         return true;
     } catch (e) {
         console.warn('No se pudo cargar el registro de empresas:', e);
