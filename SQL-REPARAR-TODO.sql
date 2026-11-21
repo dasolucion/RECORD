@@ -1,18 +1,22 @@
 -- ============================================================
--- RECORD — REPARAR MULTIEMPRESA Y BORRAR EMPRESA 407 INCORRECTA
+-- RECORD — REPARAR MULTIEMPRESA Y BORRAR LA EMPRESA INCORRECTA
 -- Ejecutar COMPLETO en Supabase → SQL Editor → proyecto RECORD
 -- (kvlkmpvnyvudlgbqoyer). Es idempotente: se puede repetir.
 -- ============================================================
+-- La empresa CORRECTA es Recordplast, C.A. — RIF J-40771060-5.
+-- Este script conserva esa empresa y borra la otra empresa creada
+-- por error, siempre que no tenga datos de negocio asociados.
+--
 -- Hace todo en un solo paso:
 --   1) Permite que la clave pública (anon) lea y escriba public.empresas.
 --   2) Asegura las columnas empresa_id.
---   3) Crea/actualiza la empresa inicial desde parametros_config (id = 1).
+--   3) Crea/actualiza Recordplast desde parametros_config (id = 1).
 --   4) Vincula la configuración y rellena empresa_id en los datos existentes.
---   5) Borra la empresa 407 creada por error (si no tiene datos asociados).
+--   5) Borra la empresa distinta de Recordplast (si es una y no tiene datos).
 --   6) Recarga la caché de PostgREST y muestra el resultado.
 
 -- ------------------------------------------------------------
--- 0) Diagnóstico previo
+-- 0) Diagnóstico previo: revise esta lista
 -- ------------------------------------------------------------
 select id, nombre, rif, activo, created_at
 from public.empresas
@@ -49,11 +53,11 @@ begin
 end $$;
 
 -- ------------------------------------------------------------
--- 3) Empresa inicial desde la configuración real (sin RIF fijo)
+-- 3) Empresa correcta desde la configuración real (sin RIF fijo)
 -- ------------------------------------------------------------
 insert into public.empresas (nombre, rif, activo)
-select coalesce(nullif(pc.nombre_empresa, ''), 'EMPRESA'),
-       coalesce(nullif(pc.rif_empresa, ''), 'J-00000000-0'),
+select coalesce(nullif(pc.nombre_empresa, ''), 'RECORDPLAST'),
+       coalesce(nullif(pc.rif_empresa, ''), 'J-40771060-5'),
        true
 from public.parametros_config pc
 where pc.id = 1
@@ -98,7 +102,7 @@ begin
 end $$;
 
 -- ------------------------------------------------------------
--- 5) Borrar la empresa 407 incorrecta (distinta de Recordplast)
+-- 5) Borrar la empresa INCORRECTA (distinta de Recordplast J-40771060-5)
 --    Sólo borra si es exactamente una y no tiene datos de negocio.
 -- ------------------------------------------------------------
 do $$
@@ -114,25 +118,24 @@ declare
     'prenomina_borrador','firmas_recibos','tokens_portal_empleado','solicitudes_ari'
   ];
 begin
+  -- Candidatas: todas las empresas que NO son Recordplast.
   select count(*) into v_count
   from public.empresas
-  where (upper(rif) like 'J-407%' or upper(rif) like '407%')
-    and upper(rif) <> 'J-40771060-5';
+  where upper(rif) <> 'J-40771060-5';
 
   if v_count = 0 then
-    raise notice 'No hay empresa 407 distinta de Recordplast. Nada que borrar.';
+    raise notice 'Solo existe Recordplast (J-40771060-5). Nada que borrar.';
     return;
   end if;
 
   if v_count > 1 then
-    raise notice 'Hay % empresas 407 candidatas. No se borra ninguna automáticamente; revise el SELECT inicial y borre por id.', v_count;
+    raise notice 'Hay % empresas distintas de Recordplast. No se borra ninguna automáticamente; revise el SELECT inicial y borre por id.', v_count;
     return;
   end if;
 
   select id into v_id
   from public.empresas
-  where (upper(rif) like 'J-407%' or upper(rif) like '407%')
-    and upper(rif) <> 'J-40771060-5'
+  where upper(rif) <> 'J-40771060-5'
   order by id
   limit 1;
 
@@ -156,7 +159,7 @@ begin
   begin
     delete from public.parametros_config where empresa_id = v_id;
     delete from public.empresas where id = v_id;
-    raise notice 'Empresa incorrecta % eliminada correctamente.', v_id;
+    raise notice 'Empresa incorrecta % eliminada correctamente. Recordplast se conserva.', v_id;
   exception when others then
     raise notice 'No se pudo borrar la empresa %: %', v_id, SQLERRM;
   end;
@@ -168,7 +171,7 @@ end $$;
 notify pgrst, 'reload schema';
 
 -- ------------------------------------------------------------
--- 7) Verificación final: debe quedar sólo Recordplast
+-- 7) Verificación final: debe quedar sólo Recordplast (J-40771060-5)
 -- ------------------------------------------------------------
 select id, nombre, rif, activo, created_at
 from public.empresas
